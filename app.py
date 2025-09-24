@@ -111,7 +111,6 @@ def ensure_state(default_prompt: str, default_model: str) -> None:
 
 def ensure_state(default_prompt: str, default_model: str) -> None:
 
-
 def active_chat() -> Optional[Dict[str, object]]:
     cid = st.session_state.get("active_chat_id")
     for chat in st.session_state.get("chats", []):
@@ -120,13 +119,11 @@ def active_chat() -> Optional[Dict[str, object]]:
     return None
 
 
-
 @st.cache_data(show_spinner=False, ttl=60, hash_funcs={httpx.Client: lambda _: None})
 def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
     payload = {"model": model, "input": text}
     resp = retry_call(client.post, "/embeddings", json=payload)
     return resp.json()["data"][0]["embedding"]
-
 
 @st.cache_data(ttl=300, show_spinner=False, hash_funcs={QdrantClient: lambda _: None})
 
@@ -218,7 +215,6 @@ def build_context(docs: List[Dict[str, object]]) -> Tuple[str, List[Dict[str, ob
     for doc in limited:
         meta = doc.get("meta", {})
         label = meta.get("source_path") or meta.get("ticker") or "Source"
-
         citations.append(
             {
                 "id": doc["id"],
@@ -265,7 +261,6 @@ def render_sources(sources: List[Dict[str, object]]) -> None:
 
 secrets = load_secrets()
 http, qc = get_clients(secrets)
-
 default_system_prompt = (
     "You are a helpful analyst. Use the provided context; if insufficient, say so. "
     "Cite sources with bracketed ids like [1]."
@@ -281,7 +276,7 @@ if qc and collection_name:
 else:
     tickers, forms = [], []
 
-
+n
 chat = active_chat()
 
 col_title, col_chip = st.columns([0.8, 0.2])
@@ -292,7 +287,6 @@ with col_chip:
     current_model = st.session_state.get("model", secrets["OPENAI_MODEL"])
     st.markdown(
         f'<div style="text-align:right"><span class="chat-chip">{current_model}</span></div>',
-
         unsafe_allow_html=True,
     )
 
@@ -309,18 +303,20 @@ st.session_state.setdefault("rag_form_custom", "")
 
 
 with st.sidebar:
-
     if st.button("➕ New Chat", key="new_chat_btn", use_container_width=True, type="primary", help="Start fresh"):
         chat = new_chat(default_system_prompt)
-        st.session_state["chats"].insert(0, chat)
+        st.session_state.setdefault("chats", []).insert(0, chat)
         st.session_state["active_chat_id"] = chat["id"]
     st.markdown("---")
-    ids = [c["id"] for c in st.session_state["chats"]]
-    titles = {c["id"]: (c["title"] or "Untitled chat") for c in st.session_state["chats"]}
+    chats_state = st.session_state.get("chats", [])
+    ids = [c["id"] for c in chats_state]
+    titles = {c["id"]: (c.get("title") or "Untitled chat") for c in chats_state}
     if ids:
-        idx = ids.index(st.session_state["active_chat_id"]) if st.session_state["active_chat_id"] in ids else 0
+        active_id = st.session_state.get("active_chat_id")
+        idx = ids.index(active_id) if active_id in ids else 0
         selected = st.radio("Chats", ids, index=idx, format_func=lambda cid: titles.get(cid, "Untitled chat"), label_visibility="collapsed")
-        if selected != st.session_state["active_chat_id"]:
+        if selected != st.session_state.get("active_chat_id"):
+
             st.session_state["active_chat_id"] = selected
             chat = active_chat()
     st.markdown("---")
@@ -340,7 +336,6 @@ with st.sidebar:
         index=model_options.index(st.session_state.get("model", model_options[0])) if st.session_state.get("model") in model_options else 0,
     )
     st.session_state["model"] = current_model
-
     rag_toggle = st.toggle("Enable RAG (Qdrant)", value=st.session_state.get("rag_enabled", False) and bool(qc))
     st.session_state["rag_enabled"] = rag_toggle and bool(qc)
     st.session_state["top_k"] = st.slider("top_k", 3, 10, int(st.session_state["top_k"]))
@@ -379,7 +374,6 @@ with st.sidebar:
             "Export chat (.json)",
             data=json.dumps(chat, ensure_ascii=False, indent=2),
             file_name=f"chat-{chat['id']}.json",
-
             mime="application/json",
             use_container_width=True,
         )
@@ -446,4 +440,3 @@ for msg in chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         render_sources(msg.get("meta", {}).get("sources", []))
-

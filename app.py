@@ -44,12 +44,14 @@ def load_secrets() -> Dict[str, Optional[str]]:
     except Exception as exc:  # noqa: BLE001
         st.error(f"Secrets missing: {exc}")
         st.stop()
+
     data = settings.model_dump()
     data["QDRANT_ENABLED"] = bool(data.get("QDRANT_URL") and data.get("QDRANT_COLLECTION"))
     return data
 
 
 @st.cache_resource(show_spinner=False)
+
 def get_clients(secrets: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Optional[QdrantClient]]:
     http = httpx.Client(
         base_url="https://api.openai.com/v1",
@@ -72,6 +74,7 @@ def get_clients(secrets: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Option
         except Exception:  # noqa: BLE001
             st.toast("Qdrant connection failed; RAG disabled.")
     return http, qc
+
 
 
 def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
@@ -100,6 +103,7 @@ def ensure_state(default_prompt: str) -> None:
     st.session_state.setdefault("filters", {"ticker": "", "form": ""})
     st.session_state.setdefault("facet_ticker", "")
     st.session_state.setdefault("facet_form", "")
+
     if not st.session_state["chats"]:
         chat = new_chat(default_prompt)
         st.session_state["chats"] = [chat]
@@ -115,6 +119,22 @@ def active_chat() -> Optional[Dict[str, object]]:
             return chat
     return None
 
+
+def call_llm(
+    client: httpx.Client,
+    model: str,
+    system_prompt: str,
+    temperature: float,
+    user_text: str,
+    context: Optional[str] = None,
+) -> str:
+    messages = [{"role": "system", "content": system_prompt}]
+    if context:
+        messages.append({"role": "system", "content": f"Context:\n{context}"})
+    messages.append({"role": "user", "content": user_text})
+    payload = {"model": model, "messages": messages, "temperature": temperature}
+    resp = retry_call(client.post, "/chat/completions", json=payload)
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 @st.cache_data(show_spinner=False, ttl=60, hash_funcs={httpx.Client: lambda _: None})
 def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
@@ -145,6 +165,7 @@ def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> 
         if next_offset is None:
             break
     return sorted(tickers), sorted(forms)
+
 
 
 def retrieve(
@@ -201,6 +222,7 @@ def build_context(docs: List[Dict[str, object]]) -> Tuple[str, List[Dict[str, ob
     for doc in limited:
         meta = doc.get("meta", {})
         label = meta.get("source_path") or meta.get("ticker") or "Source"
+
         citations.append(
             {
                 "id": doc["id"],
@@ -211,6 +233,7 @@ def build_context(docs: List[Dict[str, object]]) -> Tuple[str, List[Dict[str, ob
             }
         )
     return context, citations
+
 
 
 def call_llm(
@@ -247,6 +270,7 @@ def render_sources(sources: List[Dict[str, object]]) -> None:
 
 secrets = load_secrets()
 http, qc = get_clients(secrets)
+
 default_system_prompt = (
     "You are a helpful analyst. Use the provided context; if insufficient, say so. "
     "Cite sources with bracketed ids like [1]."
@@ -257,13 +281,27 @@ chat = active_chat()
 col_title, col_chip = st.columns([0.8, 0.2])
 with col_title:
     st.title("✨ Gold & Black Analyst")
+
 with col_chip:
     st.markdown(
         f'<div style="text-align:right"><span class="chat-chip">{secrets["OPENAI_MODEL"]}</span></div>',
         unsafe_allow_html=True,
     )
 
+rag_available = bool(qdrant_client and secrets["qdrant_collection"])
+st.session_state.setdefault("rag_toggle", rag_available)
+st.session_state.setdefault("rag_top_k", 5)
+st.session_state.setdefault("rag_threshold", 0.2)
+st.session_state.setdefault("rag_ticker", "")
+st.session_state.setdefault("rag_form", "")
+st.session_state.setdefault("rag_ticker_option", "(Any)")
+st.session_state.setdefault("rag_form_option", "(Any)")
+st.session_state.setdefault("rag_ticker_custom", "")
+st.session_state.setdefault("rag_form_custom", "")
+
+
 with st.sidebar:
+
     if st.button("➕ New Chat", key="new_chat_btn", use_container_width=True, type="primary", help="Start fresh"):
         chat = new_chat(default_system_prompt)
         st.session_state["chats"].insert(0, chat)
@@ -295,6 +333,7 @@ with st.sidebar:
             "Export chat (.json)",
             data=json.dumps(chat, ensure_ascii=False, indent=2),
             file_name=f"chat-{chat['id']}.json",
+
             mime="application/json",
             use_container_width=True,
         )
@@ -445,6 +484,7 @@ if send and user_text.strip():
                 temperature,
                 message,
                 context=context if effective_rag and context else None,
+
             )
         except Exception:  # noqa: BLE001
             st.toast("⚠️ Generation failed. Please retry.")
@@ -462,3 +502,4 @@ if send and user_text.strip():
                         source_label = d["meta"].get("source_path") or d["meta"].get("ticker") or "Source"
                         lab = f"[{d['id']}] {source_label} (score={d['score']:.3f})"
                         st.markdown(lab)
+

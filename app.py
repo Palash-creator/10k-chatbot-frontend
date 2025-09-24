@@ -38,11 +38,13 @@ st.markdown(
 
 
 def load_secrets() -> Dict[str, Optional[str]]:
+
     try:
         settings = Settings(**st.secrets)
     except Exception as exc:  # noqa: BLE001
         st.error(f"Secrets missing: {exc}")
         st.stop()
+
     data = settings.model_dump()
     data["QDRANT_ENABLED"] = bool(data.get("QDRANT_URL") and data.get("QDRANT_COLLECTION"))
     return data
@@ -70,12 +72,14 @@ def get_clients(config: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Optiona
     return client, qclient
 
 
+
 def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
     for attempt in range(1, retries + 1):
         try:
             resp = func(*args, **kwargs)
             resp.raise_for_status()
             return resp
+
         except (httpx.RequestError, httpx.HTTPStatusError):
             if attempt == retries:
                 raise
@@ -84,6 +88,7 @@ def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
 
 def new_chat(system_prompt: str) -> Dict[str, object]:
     return {"id": str(uuid.uuid4()), "title": "Untitled chat", "messages": [], "system_prompt": system_prompt}
+
 
 
 def ensure_state(default_prompt: str) -> None:
@@ -99,16 +104,16 @@ def ensure_state(default_prompt: str) -> None:
         st.session_state["chats"] = [chat]
         st.session_state["active_chat_id"] = chat["id"]
     elif not st.session_state["active_chat_id"]:
+
         st.session_state["active_chat_id"] = st.session_state["chats"][0]["id"]
 
-
 def active_chat() -> Optional[Dict[str, object]]:
-    cid = st.session_state.get("active_chat_id")
-    for chat in st.session_state.get("chats", []):
-        if chat["id"] == cid:
-            return chat
-    return None
 
+    cid = st.session_state.get("active_chat_id")
+    for idx, chat in enumerate(st.session_state.get("chats", [])):
+        if chat["id"] == cid:
+            return idx
+    return None
 
 @st.cache_data(show_spinner=False, ttl=60, hash_funcs={httpx.Client: lambda _: None})
 def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
@@ -222,6 +227,100 @@ def render_sources(sources: List[Dict[str, object]]) -> None:
             st.write(src["text"])
 
 
+@st.cache_data(show_spinner=False, ttl=60)
+def _cached_embedding(model: str, text: str) -> List[float]:
+    response = retry_call(http_client.post, "/embeddings", json={"model": model, "input": text})
+    return response.json()["data"][0]["embedding"]
+
+
+def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
+    return _cached_embedding(model, text)
+
+
+def retrieve(
+    qc: Optional[QdrantClient],
+    collection: str,
+    qvec: List[float],
+    top_k: int,
+    threshold: float,
+    ticker: str,
+    form: str,
+) -> List[Dict]:
+    if not qc or not collection:
+        return []
+    try:
+        conditions = []
+        if ticker:
+            conditions.append(FieldCondition(key="ticker", match=MatchValue(value=ticker)))
+        if form:
+            conditions.append(FieldCondition(key="form", match=MatchValue(value=form)))
+        query_filter = Filter(must=conditions) if conditions else None
+        results = qc.search(
+            collection_name=collection,
+            query_vector=qvec,
+            limit=top_k,
+            with_payload=True,
+            query_filter=query_filter,
+        )
+        docs = []
+        for idx, hit in enumerate(results, 1):
+            if threshold and hit.score < threshold:
+                continue
+            payload = hit.payload or {}
+            text = (payload.get("text") or payload.get("chunk") or "").strip()
+            if not text:
+                continue
+            docs.append(
+                {
+                    "id": idx,
+                    "text": text,
+                    "score": float(hit.score),
+                    "meta": payload,
+                }
+            )
+        return docs[:top_k]
+    except Exception:
+        st.toast("⚠️ RAG retrieval failed; continuing without context.")
+        return []
+
+
+def build_context(docs: List[Dict]) -> Tuple[str, List[Dict]]:
+    if not docs:
+        return "", []
+    chunks, citations = [], []
+    for doc in docs:
+        snippet = doc["text"][:900].strip()
+        chunks.append(f"[{doc['id']}] {snippet}")
+        label = doc["meta"].get("source_path") or doc["meta"].get("ticker") or doc["meta"].get("id") or f"Doc {doc['id']}"
+        citations.append(
+            {
+                "id": doc["id"],
+                "label": label,
+                "score": doc["score"],
+                "text": snippet,
+            }
+        )
+    return "\n\n".join(chunks), citations
+
+
+def call_llm(
+    client: httpx.Client,
+    model: str,
+    system_prompt: str,
+    temperature: float,
+    user_text: str,
+    context: Optional[str] = None,
+) -> str:
+
+    messages = [{"role": "system", "content": system_prompt.strip() or DEFAULT_SYSTEM_PROMPT}]
+    if context:
+        messages.append({"role": "system", "content": f"Context:\n{context}"})
+    messages.append({"role": "user", "content": user_text})
+    payload = {"model": model or "gpt-4o-mini", "temperature": temperature, "messages": messages}
+    response = retry_call(client.post, "/chat/completions", json=payload)
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
 secrets = load_secrets()
 client, qclient = get_clients(secrets)
 default_system_prompt = (
@@ -234,13 +333,27 @@ chat = active_chat()
 col_title, col_chip = st.columns([0.8, 0.2])
 with col_title:
     st.title("✨ Gold & Black Analyst")
+
 with col_chip:
     st.markdown(
         f'<div style="text-align:right"><span class="chat-chip">{secrets["OPENAI_MODEL"]}</span></div>',
         unsafe_allow_html=True,
     )
 
+rag_available = bool(qdrant_client and secrets["qdrant_collection"])
+st.session_state.setdefault("rag_toggle", rag_available)
+st.session_state.setdefault("rag_top_k", 5)
+st.session_state.setdefault("rag_threshold", 0.2)
+st.session_state.setdefault("rag_ticker", "")
+st.session_state.setdefault("rag_form", "")
+st.session_state.setdefault("rag_ticker_option", "(Any)")
+st.session_state.setdefault("rag_form_option", "(Any)")
+st.session_state.setdefault("rag_ticker_custom", "")
+st.session_state.setdefault("rag_form_custom", "")
+
+
 with st.sidebar:
+
     if st.button("➕ New Chat", key="new_chat_btn", use_container_width=True, type="primary", help="Start fresh"):
         chat = new_chat(default_system_prompt)
         st.session_state["chats"].insert(0, chat)
@@ -272,6 +385,7 @@ with st.sidebar:
             "Export chat (.json)",
             data=json.dumps(chat, ensure_ascii=False, indent=2),
             file_name=f"chat-{chat['id']}.json",
+
             mime="application/json",
             use_container_width=True,
         )
@@ -326,3 +440,4 @@ if prompt := st.chat_input("Ask anything"):
             with st.chat_message("assistant"):
                 st.markdown(reply)
                 render_sources(citations)
+

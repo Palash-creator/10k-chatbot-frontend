@@ -3,4 +3,3 @@ httpx
 qdrant-client
 pydantic
 python-dotenv
-

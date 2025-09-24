@@ -1,3 +1,4 @@
+import itertools
 import json
 import time
 import uuid
@@ -7,7 +8,7 @@ import httpx
 import streamlit as st
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 
 class Settings(BaseModel):
@@ -38,7 +39,6 @@ st.markdown(
 
 
 def load_secrets() -> Dict[str, Optional[str]]:
-
     try:
         settings = Settings(**st.secrets)
     except Exception as exc:  # noqa: BLE001
@@ -51,25 +51,29 @@ def load_secrets() -> Dict[str, Optional[str]]:
 
 
 @st.cache_resource(show_spinner=False)
-def get_clients(config: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Optional[QdrantClient]]:
-    client = httpx.Client(
+
+def get_clients(secrets: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Optional[QdrantClient]]:
+    http = httpx.Client(
         base_url="https://api.openai.com/v1",
-        headers={"Authorization": f"Bearer {config['OPENAI_API_KEY']}", "Content-Type": "application/json"},
-        timeout=httpx.Timeout(15.0, connect=5.0, read=15.0),
+        timeout=20.0,
+        headers={
+            "Authorization": f"Bearer {secrets['OPENAI_API_KEY']}",
+            "Content-Type": "application/json",
+        },
         http2=True,
     )
-    qclient: Optional[QdrantClient] = None
-    if config.get("QDRANT_ENABLED"):
+    qc: Optional[QdrantClient] = None
+    if secrets.get("QDRANT_ENABLED"):
         try:
-            qclient = QdrantClient(
-                url=config["QDRANT_URL"],
-                api_key=config.get("QDRANT_API_KEY"),
+            qc = QdrantClient(
+                url=secrets["QDRANT_URL"],
+                api_key=secrets.get("QDRANT_API_KEY"),
+                timeout=60.0,
                 prefer_grpc=True,
-                timeout=5.0,
             )
         except Exception:  # noqa: BLE001
             st.toast("Qdrant connection failed; RAG disabled.")
-    return client, qclient
+    return http, qc
 
 
 
@@ -79,7 +83,6 @@ def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
             resp = func(*args, **kwargs)
             resp.raise_for_status()
             return resp
-
         except (httpx.RequestError, httpx.HTTPStatusError):
             if attempt == retries:
                 raise
@@ -90,7 +93,6 @@ def new_chat(system_prompt: str) -> Dict[str, object]:
     return {"id": str(uuid.uuid4()), "title": "Untitled chat", "messages": [], "system_prompt": system_prompt}
 
 
-
 def ensure_state(default_prompt: str) -> None:
     st.session_state.setdefault("chats", [])
     st.session_state.setdefault("active_chat_id", "")
@@ -99,21 +101,40 @@ def ensure_state(default_prompt: str) -> None:
     st.session_state.setdefault("top_k", 5)
     st.session_state.setdefault("threshold", 0.2)
     st.session_state.setdefault("filters", {"ticker": "", "form": ""})
+    st.session_state.setdefault("facet_ticker", "")
+    st.session_state.setdefault("facet_form", "")
+
     if not st.session_state["chats"]:
         chat = new_chat(default_prompt)
         st.session_state["chats"] = [chat]
         st.session_state["active_chat_id"] = chat["id"]
     elif not st.session_state["active_chat_id"]:
-
         st.session_state["active_chat_id"] = st.session_state["chats"][0]["id"]
 
-def active_chat() -> Optional[Dict[str, object]]:
 
+def active_chat() -> Optional[Dict[str, object]]:
     cid = st.session_state.get("active_chat_id")
-    for idx, chat in enumerate(st.session_state.get("chats", [])):
+    for chat in st.session_state.get("chats", []):
         if chat["id"] == cid:
-            return idx
+            return chat
     return None
+
+
+def call_llm(
+    client: httpx.Client,
+    model: str,
+    system_prompt: str,
+    temperature: float,
+    user_text: str,
+    context: Optional[str] = None,
+) -> str:
+    messages = [{"role": "system", "content": system_prompt}]
+    if context:
+        messages.append({"role": "system", "content": f"Context:\n{context}"})
+    messages.append({"role": "user", "content": user_text})
+    payload = {"model": model, "messages": messages, "temperature": temperature}
+    resp = retry_call(client.post, "/chat/completions", json=payload)
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 @st.cache_data(show_spinner=False, ttl=60, hash_funcs={httpx.Client: lambda _: None})
 def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
@@ -122,81 +143,97 @@ def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
     return resp.json()["data"][0]["embedding"]
 
 
-def build_filter(ticker: str, form: str) -> Optional[qmodels.Filter]:
-    conds = []
-    if ticker:
-        conds.append(qmodels.FieldCondition(key="ticker", match=qmodels.MatchValue(value=ticker)))
-    if form:
-        conds.append(qmodels.FieldCondition(key="form", match=qmodels.MatchValue(value=form)))
-    return qmodels.Filter(must=conds) if conds else None
+@st.cache_data(ttl=300)
+def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> Tuple[List[str], List[str]]:
+    tickers, forms = set(), set()
+    next_offset = None
+    while True:
+        points, next_offset = qc.scroll(
+            collection_name=collection,
+            with_payload=True,
+            limit=page_size,
+            offset=next_offset,
+        )
+        if not points:
+            break
+        for point in points:
+            payload = point.payload or {}
+            if (ticker := payload.get("ticker")):
+                tickers.add(str(ticker))
+            if (form := payload.get("form")):
+                forms.add(str(form))
+        if next_offset is None:
+            break
+    return sorted(tickers), sorted(forms)
+
 
 
 def retrieve(
     qc: Optional[QdrantClient],
     collection: Optional[str],
-    vector: List[float],
+    qvec: List[float],
     top_k: int,
     threshold: float,
     ticker: str,
     form: str,
 ) -> List[Dict[str, object]]:
-    if not qc or not collection:
+    if not qc or not collection or not ticker or not form:
         return []
-    query_filter = build_filter(ticker, form)
-    query_fn = getattr(qc, "query_points", None)
-    if callable(query_fn):
-        response = query_fn(
-            collection_name=collection,
-            query=vector,
-            limit=top_k,
-            with_payload=True,
-            query_filter=query_filter,
-            score_threshold=threshold or None,
-        )
-        results = getattr(response, "points", response)
-    else:
-        results = qc.search(
-            collection_name=collection,
-            query_vector=vector,
-            limit=top_k,
-            with_payload=True,
-            score_threshold=None,
-            query_filter=query_filter,
-        )
+    flt = Filter(
+        must=[
+            FieldCondition(key="ticker", match=MatchValue(value=ticker)),
+            FieldCondition(key="form", match=MatchValue(value=form)),
+        ]
+    )
+    hits = qc.search(
+        collection_name=collection,
+        query_vector=qvec,
+        limit=top_k,
+        with_payload=True,
+        query_filter=flt,
+    )
     docs: List[Dict[str, object]] = []
-    for idx, point in enumerate(results, 1):
-        score = float(point.score or 0.0)
-        if score < threshold:
+    for i, h in enumerate(hits, 1):
+        if threshold and h.score < threshold:
             continue
-        payload = point.payload or {}
+        payload = h.payload or {}
         docs.append(
             {
-                "id": idx,
-                "text": payload.get("text") or payload.get("chunk") or "",
-                "score": score,
+                "id": i,
+                "text": payload.get("text", ""),
+                "score": float(h.score),
                 "meta": {
-                    "source": payload.get("source") or payload.get("path") or payload.get("ticker") or "Document",
-                    "chunk": payload.get("chunk_id") or payload.get("chunk"),
+                    "source_path": payload.get("source_path"),
+                    "chunk_idx": payload.get("chunk_idx"),
+                    "ticker": payload.get("ticker"),
+                    "form": payload.get("form"),
                 },
             }
         )
-    return docs[:5]
+    return docs
 
 
 def build_context(docs: List[Dict[str, object]]) -> Tuple[str, List[Dict[str, object]]]:
     if not docs:
         return "", []
-    context = "\n\n".join(f"[{doc['id']}] {doc['text']}" for doc in docs if doc["text"])
-    cites = [
-        {
-            "id": doc["id"],
-            "label": doc["meta"]["source"],
-            "score": doc["score"],
-            "text": doc["text"],
-        }
-        for doc in docs
-    ]
-    return context, cites
+    limited = [doc for doc in itertools.islice((d for d in docs if d.get("text")), 5)]
+    context = "\n\n".join(f"[{doc['id']}] {doc['text']}" for doc in limited)
+    citations = []
+    for doc in limited:
+        meta = doc.get("meta", {})
+        label = meta.get("source_path") or meta.get("ticker") or "Source"
+
+        citations.append(
+            {
+                "id": doc["id"],
+                "label": label,
+                "score": doc["score"],
+                "text": doc["text"],
+                "meta": meta,
+            }
+        )
+    return context, citations
+
 
 
 def call_llm(
@@ -221,108 +258,19 @@ def render_sources(sources: List[Dict[str, object]]) -> None:
         return
     st.markdown("**Sources**")
     for src in sources:
-        snippet = src["text"][:140] + ("…" if len(src["text"]) > 140 else "")
-        st.markdown(f"[{src['id']}] {src['label']} ({src['score']:.2f}) — {snippet}")
+        label = src.get("label") or src.get("meta", {}).get("source_path") or "Source"
+        score = float(src.get("score", 0.0))
+        snippet = (src.get("text") or "")[:160]
+        if snippet and len(src.get("text") or "") > 160:
+            snippet += "…"
+        st.markdown(f"[{src['id']}] {label} (score={score:.3f}) — {snippet}")
         with st.expander(f"View source [{src['id']}]"):
-            st.write(src["text"])
-
-
-@st.cache_data(show_spinner=False, ttl=60)
-def _cached_embedding(model: str, text: str) -> List[float]:
-    response = retry_call(http_client.post, "/embeddings", json={"model": model, "input": text})
-    return response.json()["data"][0]["embedding"]
-
-
-def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
-    return _cached_embedding(model, text)
-
-
-def retrieve(
-    qc: Optional[QdrantClient],
-    collection: str,
-    qvec: List[float],
-    top_k: int,
-    threshold: float,
-    ticker: str,
-    form: str,
-) -> List[Dict]:
-    if not qc or not collection:
-        return []
-    try:
-        conditions = []
-        if ticker:
-            conditions.append(FieldCondition(key="ticker", match=MatchValue(value=ticker)))
-        if form:
-            conditions.append(FieldCondition(key="form", match=MatchValue(value=form)))
-        query_filter = Filter(must=conditions) if conditions else None
-        results = qc.search(
-            collection_name=collection,
-            query_vector=qvec,
-            limit=top_k,
-            with_payload=True,
-            query_filter=query_filter,
-        )
-        docs = []
-        for idx, hit in enumerate(results, 1):
-            if threshold and hit.score < threshold:
-                continue
-            payload = hit.payload or {}
-            text = (payload.get("text") or payload.get("chunk") or "").strip()
-            if not text:
-                continue
-            docs.append(
-                {
-                    "id": idx,
-                    "text": text,
-                    "score": float(hit.score),
-                    "meta": payload,
-                }
-            )
-        return docs[:top_k]
-    except Exception:
-        st.toast("⚠️ RAG retrieval failed; continuing without context.")
-        return []
-
-
-def build_context(docs: List[Dict]) -> Tuple[str, List[Dict]]:
-    if not docs:
-        return "", []
-    chunks, citations = [], []
-    for doc in docs:
-        snippet = doc["text"][:900].strip()
-        chunks.append(f"[{doc['id']}] {snippet}")
-        label = doc["meta"].get("source_path") or doc["meta"].get("ticker") or doc["meta"].get("id") or f"Doc {doc['id']}"
-        citations.append(
-            {
-                "id": doc["id"],
-                "label": label,
-                "score": doc["score"],
-                "text": snippet,
-            }
-        )
-    return "\n\n".join(chunks), citations
-
-
-def call_llm(
-    client: httpx.Client,
-    model: str,
-    system_prompt: str,
-    temperature: float,
-    user_text: str,
-    context: Optional[str] = None,
-) -> str:
-
-    messages = [{"role": "system", "content": system_prompt.strip() or DEFAULT_SYSTEM_PROMPT}]
-    if context:
-        messages.append({"role": "system", "content": f"Context:\n{context}"})
-    messages.append({"role": "user", "content": user_text})
-    payload = {"model": model or "gpt-4o-mini", "temperature": temperature, "messages": messages}
-    response = retry_call(client.post, "/chat/completions", json=payload)
-    return response.json()["choices"][0]["message"]["content"].strip()
+            st.write(src.get("text", ""))
 
 
 secrets = load_secrets()
-client, qclient = get_clients(secrets)
+http, qc = get_clients(secrets)
+
 default_system_prompt = (
     "You are a helpful analyst. Use the provided context; if insufficient, say so. "
     "Cite sources with bracketed ids like [1]."
@@ -368,8 +316,8 @@ with st.sidebar:
             st.session_state["active_chat_id"] = selected
             chat = active_chat()
     st.markdown("---")
-    rag_toggle = st.toggle("Enable RAG (Qdrant)", value=st.session_state.get("rag_enabled", False) and bool(qclient))
-    st.session_state["rag_enabled"] = rag_toggle and bool(qclient)
+    rag_toggle = st.toggle("Enable RAG (Qdrant)", value=st.session_state.get("rag_enabled", False) and bool(qc))
+    st.session_state["rag_enabled"] = rag_toggle and bool(qc)
     st.session_state["top_k"] = st.slider("top_k", 3, 10, int(st.session_state["top_k"]))
     st.session_state["threshold"] = st.slider("score threshold", 0.0, 1.0, float(st.session_state["threshold"]), 0.05)
     filters = st.session_state["filters"]
@@ -394,50 +342,164 @@ if not chat:
     st.info("Create a chat to begin.")
     st.stop()
 
+collection_name = secrets.get("QDRANT_COLLECTION")
+if qc and collection_name:
+    try:
+        tickers, forms = discover_facets(qc, collection_name)
+    except Exception:  # noqa: BLE001
+        st.toast("Could not load Qdrant facets; you can still chat without RAG.", icon="⚠️")
+        tickers, forms = [], []
+else:
+    tickers, forms = [], []
+
+with st.container():
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        ticker_kwargs: Dict[str, int] = {}
+        if tickers:
+            default_ticker = st.session_state.get("facet_ticker")
+            ticker_kwargs["index"] = tickers.index(default_ticker) if default_ticker in tickers else 0
+            sel_ticker = st.selectbox(
+                "Ticker",
+                tickers,
+                key="facet_ticker",
+                placeholder="Select ticker",
+                **ticker_kwargs,
+            )
+        else:
+            st.selectbox(
+                "Ticker",
+                ["No tickers"],
+                index=0,
+                key="facet_ticker_disabled",
+                disabled=True,
+            )
+            sel_ticker = ""
+            st.session_state["facet_ticker"] = ""
+    with c2:
+        form_kwargs: Dict[str, int] = {}
+        if forms:
+            default_form = st.session_state.get("facet_form")
+            form_kwargs["index"] = forms.index(default_form) if default_form in forms else 0
+            sel_form = st.selectbox(
+                "Form",
+                forms,
+                key="facet_form",
+                placeholder="Select form",
+                **form_kwargs,
+            )
+        else:
+            st.selectbox(
+                "Form",
+                ["No forms"],
+                index=0,
+                key="facet_form_disabled",
+                disabled=True,
+            )
+            sel_form = ""
+            st.session_state["facet_form"] = ""
+    with c3:
+        st.caption("Pick a ticker & form to enable RAG retrieval")
+
+rag_enabled = st.session_state.get("rag_enabled", False)
+has_facets = bool(sel_ticker and sel_form)
+effective_rag = rag_enabled and has_facets
+if rag_enabled and not has_facets:
+    st.info("Select a ticker and a form to use retrieval.", icon="ℹ️")
+
+filters = st.session_state.get("filters", {})
+filters["ticker"] = sel_ticker or ""
+filters["form"] = sel_form or ""
+st.session_state["filters"] = filters
+
 for msg in chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         render_sources(msg.get("meta", {}).get("sources", []))
 
-if prompt := st.chat_input("Ask anything"):
-    chat["messages"].append({"role": "user", "content": prompt})
-    if chat["title"] == "Untitled chat":
-        chat["title"] = prompt.splitlines()[0][:40] or "Untitled chat"
+system_prompt = chat.get("system_prompt", default_system_prompt)
+temperature = float(st.session_state.get("temperature", 0.3))
+top_k = int(st.session_state.get("top_k", 5))
+threshold = float(st.session_state.get("threshold", 0.2))
+embed_model = secrets.get("OPENAI_EMBED_MODEL", "text-embedding-3-large")
 
+# Inline input row (text, model switch, send)
+m1, m2, m3 = st.columns([6, 2, 1])
+with m1:
+    user_text = st.text_input(
+        "Your message",
+        value=st.session_state.get("chat_text", ""),
+        label_visibility="collapsed",
+        key="chat_text",
+    )
+with m2:
+    model_options = list(
+        dict.fromkeys(
+            [
+                secrets.get("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4.1-mini",
+            ]
+        )
+    )
+    cur_model = st.selectbox(
+        "Model",
+        model_options,
+        index=0,
+        label_visibility="collapsed",
+        key="model_select",
+    )
+with m3:
+    send = st.button("Send", use_container_width=True)
+
+if send and user_text.strip():
+    message = user_text.strip()
+    st.session_state["chat_text"] = ""
+    chat["messages"].append({"role": "user", "content": message})
+    with st.chat_message("user"):
+        st.markdown(message)
+    if chat["title"] == "Untitled chat":
+        chat["title"] = message.splitlines()[0][:40] or "Untitled chat"
+
+    docs: List[Dict[str, object]] = []
     citations: List[Dict[str, object]] = []
     context: Optional[str] = None
-    if st.session_state["rag_enabled"]:
+    if effective_rag:
         with st.spinner("Retrieving…"):
             try:
-                vector = embed_query(client, secrets["OPENAI_EMBED_MODEL"], prompt)
-                docs = retrieve(
-                    qclient,
-                    secrets.get("QDRANT_COLLECTION"),
-                    vector,
-                    st.session_state["top_k"],
-                    st.session_state["threshold"],
-                    st.session_state["filters"].get("ticker", ""),
-                    st.session_state["filters"].get("form", ""),
-                )
+                qvec = embed_query(http, embed_model, message)
+                docs = retrieve(qc, collection_name, qvec, top_k, threshold, sel_ticker, sel_form)
                 context, citations = build_context(docs)
             except Exception:  # noqa: BLE001
-                st.toast("RAG unavailable; continuing without context.")
-                context, citations = None, []
+                st.toast("RAG unavailable; continuing without context.", icon="⚠️")
+                docs, citations, context = [], [], None
+
     with st.spinner("Generating…"):
         try:
             reply = call_llm(
-                client,
-                secrets["OPENAI_MODEL"],
-                chat.get("system_prompt", default_system_prompt),
-                float(st.session_state["temperature"]),
-                prompt,
-                context=context,
+                http,
+                cur_model,
+                system_prompt,
+                temperature,
+                message,
+                context=context if effective_rag and context else None,
+
             )
         except Exception:  # noqa: BLE001
             st.toast("⚠️ Generation failed. Please retry.")
         else:
-            chat["messages"].append({"role": "assistant", "content": reply, "meta": {"sources": citations}})
+            assistant_entry: Dict[str, object] = {"role": "assistant", "content": reply}
+            if citations:
+                assistant_entry["meta"] = {"sources": citations}
+            chat["messages"].append(assistant_entry)
             with st.chat_message("assistant"):
                 st.markdown(reply)
                 render_sources(citations)
+            if effective_rag and docs:
+                with st.expander("Sources"):
+                    for d in docs:
+                        source_label = d["meta"].get("source_path") or d["meta"].get("ticker") or "Source"
+                        lab = f"[{d['id']}] {source_label} (score={d['score']:.3f})"
+                        st.markdown(lab)
 

@@ -44,12 +44,14 @@ def load_secrets() -> Dict[str, Optional[str]]:
     except Exception as exc:  # noqa: BLE001
         st.error(f"Secrets missing: {exc}")
         st.stop()
+
     data = settings.model_dump()
     data["QDRANT_ENABLED"] = bool(data.get("QDRANT_URL") and data.get("QDRANT_COLLECTION"))
     return data
 
 
 @st.cache_resource(show_spinner=False)
+
 def get_clients(secrets: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Optional[QdrantClient]]:
     http = httpx.Client(
         base_url="https://api.openai.com/v1",
@@ -107,12 +109,16 @@ def ensure_state(default_prompt: str, default_model: str) -> None:
         st.session_state["active_chat_id"] = st.session_state["chats"][0]["id"]
 
 
+def ensure_state(default_prompt: str, default_model: str) -> None:
+
+
 def active_chat() -> Optional[Dict[str, object]]:
     cid = st.session_state.get("active_chat_id")
     for chat in st.session_state.get("chats", []):
         if chat["id"] == cid:
             return chat
     return None
+
 
 
 @st.cache_data(show_spinner=False, ttl=60, hash_funcs={httpx.Client: lambda _: None})
@@ -123,6 +129,7 @@ def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
 
 
 @st.cache_data(ttl=300, show_spinner=False, hash_funcs={QdrantClient: lambda _: None})
+
 def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> Tuple[List[str], List[str]]:
     tickers, forms = set(), set()
     next_offset = None
@@ -143,6 +150,7 @@ def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> 
                 or getattr(res, "offset", None)
                 or getattr(res, "next_offset", None)
             )
+
         if not points:
             break
         for point in points:
@@ -210,6 +218,7 @@ def build_context(docs: List[Dict[str, object]]) -> Tuple[str, List[Dict[str, ob
     for doc in limited:
         meta = doc.get("meta", {})
         label = meta.get("source_path") or meta.get("ticker") or "Source"
+
         citations.append(
             {
                 "id": doc["id"],
@@ -256,6 +265,7 @@ def render_sources(sources: List[Dict[str, object]]) -> None:
 
 secrets = load_secrets()
 http, qc = get_clients(secrets)
+
 default_system_prompt = (
     "You are a helpful analyst. Use the provided context; if insufficient, say so. "
     "Cite sources with bracketed ids like [1]."
@@ -271,19 +281,35 @@ if qc and collection_name:
 else:
     tickers, forms = [], []
 
+
 chat = active_chat()
 
 col_title, col_chip = st.columns([0.8, 0.2])
 with col_title:
     st.title("✨ Gold & Black Analyst")
+
 with col_chip:
     current_model = st.session_state.get("model", secrets["OPENAI_MODEL"])
     st.markdown(
         f'<div style="text-align:right"><span class="chat-chip">{current_model}</span></div>',
+
         unsafe_allow_html=True,
     )
 
+rag_available = bool(qdrant_client and secrets["qdrant_collection"])
+st.session_state.setdefault("rag_toggle", rag_available)
+st.session_state.setdefault("rag_top_k", 5)
+st.session_state.setdefault("rag_threshold", 0.2)
+st.session_state.setdefault("rag_ticker", "")
+st.session_state.setdefault("rag_form", "")
+st.session_state.setdefault("rag_ticker_option", "(Any)")
+st.session_state.setdefault("rag_form_option", "(Any)")
+st.session_state.setdefault("rag_ticker_custom", "")
+st.session_state.setdefault("rag_form_custom", "")
+
+
 with st.sidebar:
+
     if st.button("➕ New Chat", key="new_chat_btn", use_container_width=True, type="primary", help="Start fresh"):
         chat = new_chat(default_system_prompt)
         st.session_state["chats"].insert(0, chat)
@@ -314,6 +340,7 @@ with st.sidebar:
         index=model_options.index(st.session_state.get("model", model_options[0])) if st.session_state.get("model") in model_options else 0,
     )
     st.session_state["model"] = current_model
+
     rag_toggle = st.toggle("Enable RAG (Qdrant)", value=st.session_state.get("rag_enabled", False) and bool(qc))
     st.session_state["rag_enabled"] = rag_toggle and bool(qc)
     st.session_state["top_k"] = st.slider("top_k", 3, 10, int(st.session_state["top_k"]))
@@ -341,6 +368,7 @@ with st.sidebar:
         )
     else:
         filters["form"] = st.text_input("Form", value=filters.get("form", ""))
+
     st.session_state["filters"] = filters
     with st.expander("Advanced", expanded=False):
         if chat:
@@ -351,6 +379,7 @@ with st.sidebar:
             "Export chat (.json)",
             data=json.dumps(chat, ensure_ascii=False, indent=2),
             file_name=f"chat-{chat['id']}.json",
+
             mime="application/json",
             use_container_width=True,
         )
@@ -417,3 +446,4 @@ for msg in chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         render_sources(msg.get("meta", {}).get("sources", []))
+

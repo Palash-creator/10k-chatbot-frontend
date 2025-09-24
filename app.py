@@ -17,8 +17,7 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_TEMPERATURE = 0.3
 MAX_TITLE_LEN = 48
 
-
-st.set_page_config(page_title="Gold & Black Chat", page_icon="✨", layout="wide")
+st.set_page_config(page_title="SEC Filings", page_icon="✨", layout="wide")
 
 APP_CSS = """
 <style>
@@ -104,7 +103,6 @@ def get_clients(secrets: Dict[str, str]) -> Tuple[httpx.Client, Optional[QdrantC
     return http_client, qc
 
 
-
 def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
     for attempt in range(1, retries + 1):
         try:
@@ -177,12 +175,10 @@ def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
     return _cached_embedding(model, text)
 
 
-
 def retrieve(
     qc: Optional[QdrantClient],
     collection: str,
     qvec: List[float],
-
     top_k: int,
     threshold: float,
     ticker: str,
@@ -273,7 +269,9 @@ active_idx, active_chat = load_active_chat()
 
 col_title, col_chip = st.columns([0.8, 0.2])
 with col_title:
-    st.title("✨ Gold & Black Chat")
+
+    st.title("SEC Filings")
+
 with col_chip:
     st.markdown(
         f'<div style="text-align:right"><span class="chat-chip">{secrets["model"]}</span></div>',
@@ -286,6 +284,11 @@ st.session_state.setdefault("rag_top_k", 5)
 st.session_state.setdefault("rag_threshold", 0.2)
 st.session_state.setdefault("rag_ticker", "")
 st.session_state.setdefault("rag_form", "")
+st.session_state.setdefault("rag_ticker_option", "(Any)")
+st.session_state.setdefault("rag_form_option", "(Any)")
+st.session_state.setdefault("rag_ticker_custom", "")
+st.session_state.setdefault("rag_form_custom", "")
+
 
 with st.sidebar:
     if st.button("➕ New Chat", use_container_width=True):
@@ -316,10 +319,63 @@ with st.sidebar:
         disabled=not rag_available,
     )
     if st.session_state["rag_toggle"] and rag_available:
-        st.session_state["rag_top_k"] = st.slider("Top K", 3, 10, st.session_state["rag_top_k"])
-        st.session_state["rag_threshold"] = st.slider("Score threshold", 0.0, 1.0, float(st.session_state["rag_threshold"]), 0.05)
-        st.session_state["rag_ticker"] = st.text_input("Ticker filter", st.session_state["rag_ticker"])
-        st.session_state["rag_form"] = st.text_input("Form filter", st.session_state["rag_form"])
+
+        ticker_options = ["(Any)", "Custom…", "AAPL", "AMZN", "GOOGL", "META", "MSFT", "TSLA"]
+        form_options = [
+            "(Any)",
+            "Custom…",
+            "10-K",
+            "10-Q",
+            "8-K",
+            "S-1",
+            "13F-HR",
+            "DEF 14A",
+        ]
+
+        current_ticker_option = st.session_state["rag_ticker_option"]
+        if st.session_state["rag_ticker"] and st.session_state["rag_ticker"] not in ticker_options:
+            current_ticker_option = "Custom…"
+        selected_ticker = st.selectbox(
+            "Ticker filter",
+            ticker_options,
+            index=ticker_options.index(current_ticker_option) if current_ticker_option in ticker_options else 0,
+        )
+        st.session_state["rag_ticker_option"] = selected_ticker
+        if selected_ticker == "(Any)":
+            st.session_state["rag_ticker"] = ""
+        elif selected_ticker == "Custom…":
+            custom_ticker = st.text_input(
+                "Custom ticker",
+                value=st.session_state.get("rag_ticker_custom", ""),
+                max_chars=12,
+            )
+            st.session_state["rag_ticker_custom"] = custom_ticker.strip().upper()
+            st.session_state["rag_ticker"] = st.session_state["rag_ticker_custom"]
+        else:
+            st.session_state["rag_ticker"] = selected_ticker
+
+        current_form_option = st.session_state["rag_form_option"]
+        if st.session_state["rag_form"] and st.session_state["rag_form"] not in form_options:
+            current_form_option = "Custom…"
+        selected_form = st.selectbox(
+            "Form filter",
+            form_options,
+            index=form_options.index(current_form_option) if current_form_option in form_options else 0,
+        )
+        st.session_state["rag_form_option"] = selected_form
+        if selected_form == "(Any)":
+            st.session_state["rag_form"] = ""
+        elif selected_form == "Custom…":
+            custom_form = st.text_input(
+                "Custom form",
+                value=st.session_state.get("rag_form_custom", ""),
+                max_chars=16,
+            )
+            st.session_state["rag_form_custom"] = custom_form.strip().upper()
+            st.session_state["rag_form"] = st.session_state["rag_form_custom"]
+        else:
+            st.session_state["rag_form"] = selected_form
+
     with st.expander("Advanced", expanded=False):
         if active_chat:
             prompt_key = active_chat.id
@@ -327,6 +383,13 @@ with st.sidebar:
             updated_prompt = st.text_area("System prompt", value=prompt_value, height=120)
             st.session_state["system_prompts"][prompt_key] = updated_prompt.strip() or DEFAULT_SYSTEM_PROMPT
         st.session_state["temperature"] = st.slider("Temperature", 0.0, 1.0, float(st.session_state["temperature"]), 0.05)
+        if st.session_state["rag_toggle"] and rag_available:
+            st.markdown("**RAG tuning**")
+            st.session_state["rag_top_k"] = st.slider("Top K", 3, 10, st.session_state["rag_top_k"])
+            st.session_state["rag_threshold"] = st.slider(
+                "Score threshold", 0.0, 1.0, float(st.session_state["rag_threshold"]), 0.05
+            )
+
     if active_chat:
         export_data = json.dumps(active_chat.model_dump(), ensure_ascii=False, indent=2)
         st.download_button(
@@ -409,4 +472,3 @@ if active_chat:
                 persist_chat(active_idx, active_chat)
 else:
     st.info("Create a chat to begin.")
-

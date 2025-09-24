@@ -93,7 +93,6 @@ def new_chat(system_prompt: str) -> Dict[str, object]:
 
 
 def ensure_state(default_prompt: str, default_model: str) -> None:
-
     st.session_state.setdefault("chats", [])
     st.session_state.setdefault("active_chat_id", "")
     st.session_state.setdefault("temperature", 0.3)
@@ -102,13 +101,16 @@ def ensure_state(default_prompt: str, default_model: str) -> None:
     st.session_state.setdefault("threshold", 0.2)
     st.session_state.setdefault("filters", {"ticker": "", "form": ""})
     st.session_state.setdefault("model", default_model)
-
     if not st.session_state["chats"]:
         chat = new_chat(default_prompt)
         st.session_state["chats"] = [chat]
         st.session_state["active_chat_id"] = chat["id"]
     elif not st.session_state["active_chat_id"]:
         st.session_state["active_chat_id"] = st.session_state["chats"][0]["id"]
+
+
+def ensure_state(default_prompt: str, default_model: str) -> None:
+
 
 def active_chat() -> Optional[Dict[str, object]]:
     cid = st.session_state.get("active_chat_id")
@@ -126,7 +128,8 @@ def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
     return resp.json()["data"][0]["embedding"]
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False, hash_funcs={QdrantClient: lambda _: None})
+
 def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> Tuple[List[str], List[str]]:
     tickers, forms = set(), set()
     next_offset = None

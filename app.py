@@ -104,17 +104,18 @@ def get_clients(secrets: Dict[str, str]) -> Tuple[httpx.Client, Optional[QdrantC
     return http_client, qc
 
 
+
 def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
     for attempt in range(1, retries + 1):
         try:
             response = func(*args, **kwargs)
             response.raise_for_status()
             return response
+
         except (httpx.RequestError, httpx.HTTPStatusError):
             if attempt == retries:
                 raise
             time.sleep(backoff * (2 ** (attempt - 1)))
-
 
 def ensure_state(default_prompt: str) -> None:
     st.session_state.setdefault("chats", [])
@@ -176,10 +177,12 @@ def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
     return _cached_embedding(model, text)
 
 
+
 def retrieve(
     qc: Optional[QdrantClient],
     collection: str,
     qvec: List[float],
+
     top_k: int,
     threshold: float,
     ticker: str,
@@ -250,6 +253,7 @@ def call_llm(
     user_text: str,
     context: Optional[str] = None,
 ) -> str:
+
     messages = [{"role": "system", "content": system_prompt.strip() or DEFAULT_SYSTEM_PROMPT}]
     if context:
         messages.append({"role": "system", "content": f"Context:\n{context}"})
@@ -405,3 +409,4 @@ if active_chat:
                 persist_chat(active_idx, active_chat)
 else:
     st.info("Create a chat to begin.")
+

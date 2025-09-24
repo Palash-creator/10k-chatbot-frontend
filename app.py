@@ -17,7 +17,6 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_TEMPERATURE = 0.3
 MAX_TITLE_LEN = 48
 
-
 st.set_page_config(page_title="SEC Filings", page_icon="✨", layout="wide")
 
 APP_CSS = """
@@ -110,11 +109,11 @@ def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
             response = func(*args, **kwargs)
             response.raise_for_status()
             return response
+
         except (httpx.RequestError, httpx.HTTPStatusError):
             if attempt == retries:
                 raise
             time.sleep(backoff * (2 ** (attempt - 1)))
-
 
 def ensure_state(default_prompt: str) -> None:
     st.session_state.setdefault("chats", [])
@@ -250,6 +249,7 @@ def call_llm(
     user_text: str,
     context: Optional[str] = None,
 ) -> str:
+
     messages = [{"role": "system", "content": system_prompt.strip() or DEFAULT_SYSTEM_PROMPT}]
     if context:
         messages.append({"role": "system", "content": f"Context:\n{context}"})
@@ -269,7 +269,9 @@ active_idx, active_chat = load_active_chat()
 
 col_title, col_chip = st.columns([0.8, 0.2])
 with col_title:
+
     st.title("SEC Filings")
+
 with col_chip:
     st.markdown(
         f'<div style="text-align:right"><span class="chat-chip">{secrets["model"]}</span></div>',
@@ -286,6 +288,7 @@ st.session_state.setdefault("rag_ticker_option", "(Any)")
 st.session_state.setdefault("rag_form_option", "(Any)")
 st.session_state.setdefault("rag_ticker_custom", "")
 st.session_state.setdefault("rag_form_custom", "")
+
 
 with st.sidebar:
     if st.button("➕ New Chat", use_container_width=True):
@@ -316,6 +319,7 @@ with st.sidebar:
         disabled=not rag_available,
     )
     if st.session_state["rag_toggle"] and rag_available:
+
         ticker_options = ["(Any)", "Custom…", "AAPL", "AMZN", "GOOGL", "META", "MSFT", "TSLA"]
         form_options = [
             "(Any)",
@@ -371,6 +375,7 @@ with st.sidebar:
             st.session_state["rag_form"] = st.session_state["rag_form_custom"]
         else:
             st.session_state["rag_form"] = selected_form
+
     with st.expander("Advanced", expanded=False):
         if active_chat:
             prompt_key = active_chat.id
@@ -384,6 +389,7 @@ with st.sidebar:
             st.session_state["rag_threshold"] = st.slider(
                 "Score threshold", 0.0, 1.0, float(st.session_state["rag_threshold"]), 0.05
             )
+
     if active_chat:
         export_data = json.dumps(active_chat.model_dump(), ensure_ascii=False, indent=2)
         st.download_button(

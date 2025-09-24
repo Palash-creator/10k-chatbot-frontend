@@ -76,7 +76,6 @@ def get_clients(secrets: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Option
     return http, qc
 
 
-
 def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
     for attempt in range(1, retries + 1):
         try:
@@ -93,7 +92,8 @@ def new_chat(system_prompt: str) -> Dict[str, object]:
     return {"id": str(uuid.uuid4()), "title": "Untitled chat", "messages": [], "system_prompt": system_prompt}
 
 
-def ensure_state(default_prompt: str) -> None:
+def ensure_state(default_prompt: str, default_model: str) -> None:
+
     st.session_state.setdefault("chats", [])
     st.session_state.setdefault("active_chat_id", "")
     st.session_state.setdefault("temperature", 0.3)
@@ -101,8 +101,7 @@ def ensure_state(default_prompt: str) -> None:
     st.session_state.setdefault("top_k", 5)
     st.session_state.setdefault("threshold", 0.2)
     st.session_state.setdefault("filters", {"ticker": "", "form": ""})
-    st.session_state.setdefault("facet_ticker", "")
-    st.session_state.setdefault("facet_form", "")
+    st.session_state.setdefault("model", default_model)
 
     if not st.session_state["chats"]:
         chat = new_chat(default_prompt)
@@ -110,7 +109,6 @@ def ensure_state(default_prompt: str) -> None:
         st.session_state["active_chat_id"] = chat["id"]
     elif not st.session_state["active_chat_id"]:
         st.session_state["active_chat_id"] = st.session_state["chats"][0]["id"]
-
 
 def active_chat() -> Optional[Dict[str, object]]:
     cid = st.session_state.get("active_chat_id")
@@ -120,21 +118,6 @@ def active_chat() -> Optional[Dict[str, object]]:
     return None
 
 
-def call_llm(
-    client: httpx.Client,
-    model: str,
-    system_prompt: str,
-    temperature: float,
-    user_text: str,
-    context: Optional[str] = None,
-) -> str:
-    messages = [{"role": "system", "content": system_prompt}]
-    if context:
-        messages.append({"role": "system", "content": f"Context:\n{context}"})
-    messages.append({"role": "user", "content": user_text})
-    payload = {"model": model, "messages": messages, "temperature": temperature}
-    resp = retry_call(client.post, "/chat/completions", json=payload)
-    return resp.json()["choices"][0]["message"]["content"].strip()
 
 @st.cache_data(show_spinner=False, ttl=60, hash_funcs={httpx.Client: lambda _: None})
 def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
@@ -148,12 +131,23 @@ def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> 
     tickers, forms = set(), set()
     next_offset = None
     while True:
-        points, next_offset = qc.scroll(
+        res = qc.scroll(
             collection_name=collection,
             with_payload=True,
+            with_vectors=False,
             limit=page_size,
             offset=next_offset,
         )
+        if isinstance(res, tuple):
+            points, next_offset = res
+        else:
+            points = getattr(res, "points", [])
+            next_offset = (
+                getattr(res, "next_page_offset", None)
+                or getattr(res, "offset", None)
+                or getattr(res, "next_offset", None)
+            )
+
         if not points:
             break
         for point in points:
@@ -165,7 +159,6 @@ def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> 
         if next_offset is None:
             break
     return sorted(tickers), sorted(forms)
-
 
 
 def retrieve(
@@ -235,7 +228,6 @@ def build_context(docs: List[Dict[str, object]]) -> Tuple[str, List[Dict[str, ob
     return context, citations
 
 
-
 def call_llm(
     client: httpx.Client,
     model: str,
@@ -275,7 +267,18 @@ default_system_prompt = (
     "You are a helpful analyst. Use the provided context; if insufficient, say so. "
     "Cite sources with bracketed ids like [1]."
 )
-ensure_state(default_system_prompt)
+ensure_state(default_system_prompt, secrets.get("OPENAI_MODEL", "gpt-4o-mini"))
+collection_name = secrets.get("QDRANT_COLLECTION")
+if qc and collection_name:
+    try:
+        tickers, forms = discover_facets(qc, collection_name)
+    except Exception:  # noqa: BLE001
+        st.toast("Could not load Qdrant facets; you can still chat without RAG.", icon="⚠️")
+        tickers, forms = [], []
+else:
+    tickers, forms = [], []
+
+
 chat = active_chat()
 
 col_title, col_chip = st.columns([0.8, 0.2])
@@ -283,8 +286,10 @@ with col_title:
     st.title("✨ Gold & Black Analyst")
 
 with col_chip:
+    current_model = st.session_state.get("model", secrets["OPENAI_MODEL"])
     st.markdown(
-        f'<div style="text-align:right"><span class="chat-chip">{secrets["OPENAI_MODEL"]}</span></div>',
+        f'<div style="text-align:right"><span class="chat-chip">{current_model}</span></div>',
+
         unsafe_allow_html=True,
     )
 
@@ -316,13 +321,51 @@ with st.sidebar:
             st.session_state["active_chat_id"] = selected
             chat = active_chat()
     st.markdown("---")
+    model_options = list(
+        dict.fromkeys(
+            [
+                secrets.get("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4.1-mini",
+            ]
+        )
+    )
+    current_model = st.selectbox(
+        "Model",
+        model_options,
+        index=model_options.index(st.session_state.get("model", model_options[0])) if st.session_state.get("model") in model_options else 0,
+    )
+    st.session_state["model"] = current_model
+
     rag_toggle = st.toggle("Enable RAG (Qdrant)", value=st.session_state.get("rag_enabled", False) and bool(qc))
     st.session_state["rag_enabled"] = rag_toggle and bool(qc)
     st.session_state["top_k"] = st.slider("top_k", 3, 10, int(st.session_state["top_k"]))
     st.session_state["threshold"] = st.slider("score threshold", 0.0, 1.0, float(st.session_state["threshold"]), 0.05)
     filters = st.session_state["filters"]
-    filters["ticker"] = st.text_input("Ticker", value=filters.get("ticker", ""))
-    filters["form"] = st.text_input("Form", value=filters.get("form", ""))
+    if tickers:
+        ticker_options = [""] + tickers
+        ticker_index = ticker_options.index(filters.get("ticker", "")) if filters.get("ticker", "") in ticker_options else 0
+        filters["ticker"] = st.selectbox(
+            "Ticker",
+            ticker_options,
+            index=ticker_index,
+            format_func=lambda x: x or "Select ticker",
+        )
+    else:
+        filters["ticker"] = st.text_input("Ticker", value=filters.get("ticker", ""))
+    if forms:
+        form_options = [""] + forms
+        form_index = form_options.index(filters.get("form", "")) if filters.get("form", "") in form_options else 0
+        filters["form"] = st.selectbox(
+            "Form",
+            form_options,
+            index=form_index,
+            format_func=lambda x: x or "Select form",
+        )
+    else:
+        filters["form"] = st.text_input("Form", value=filters.get("form", ""))
+
     st.session_state["filters"] = filters
     with st.expander("Advanced", expanded=False):
         if chat:
@@ -342,123 +385,26 @@ if not chat:
     st.info("Create a chat to begin.")
     st.stop()
 
-collection_name = secrets.get("QDRANT_COLLECTION")
-if qc and collection_name:
-    try:
-        tickers, forms = discover_facets(qc, collection_name)
-    except Exception:  # noqa: BLE001
-        st.toast("Could not load Qdrant facets; you can still chat without RAG.", icon="⚠️")
-        tickers, forms = [], []
-else:
-    tickers, forms = [], []
-
-with st.container():
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        ticker_kwargs: Dict[str, int] = {}
-        if tickers:
-            default_ticker = st.session_state.get("facet_ticker")
-            ticker_kwargs["index"] = tickers.index(default_ticker) if default_ticker in tickers else 0
-            sel_ticker = st.selectbox(
-                "Ticker",
-                tickers,
-                key="facet_ticker",
-                placeholder="Select ticker",
-                **ticker_kwargs,
-            )
-        else:
-            st.selectbox(
-                "Ticker",
-                ["No tickers"],
-                index=0,
-                key="facet_ticker_disabled",
-                disabled=True,
-            )
-            sel_ticker = ""
-            st.session_state["facet_ticker"] = ""
-    with c2:
-        form_kwargs: Dict[str, int] = {}
-        if forms:
-            default_form = st.session_state.get("facet_form")
-            form_kwargs["index"] = forms.index(default_form) if default_form in forms else 0
-            sel_form = st.selectbox(
-                "Form",
-                forms,
-                key="facet_form",
-                placeholder="Select form",
-                **form_kwargs,
-            )
-        else:
-            st.selectbox(
-                "Form",
-                ["No forms"],
-                index=0,
-                key="facet_form_disabled",
-                disabled=True,
-            )
-            sel_form = ""
-            st.session_state["facet_form"] = ""
-    with c3:
-        st.caption("Pick a ticker & form to enable RAG retrieval")
-
+filters = st.session_state.get("filters", {})
+sel_ticker = (filters.get("ticker") or "").strip()
+sel_form = (filters.get("form") or "").strip()
 rag_enabled = st.session_state.get("rag_enabled", False)
 has_facets = bool(sel_ticker and sel_form)
 effective_rag = rag_enabled and has_facets
 if rag_enabled and not has_facets:
     st.info("Select a ticker and a form to use retrieval.", icon="ℹ️")
 
-filters = st.session_state.get("filters", {})
-filters["ticker"] = sel_ticker or ""
-filters["form"] = sel_form or ""
-st.session_state["filters"] = filters
-
-for msg in chat["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        render_sources(msg.get("meta", {}).get("sources", []))
-
 system_prompt = chat.get("system_prompt", default_system_prompt)
 temperature = float(st.session_state.get("temperature", 0.3))
 top_k = int(st.session_state.get("top_k", 5))
 threshold = float(st.session_state.get("threshold", 0.2))
 embed_model = secrets.get("OPENAI_EMBED_MODEL", "text-embedding-3-large")
+model_name = st.session_state.get("model", secrets.get("OPENAI_MODEL", "gpt-4o-mini"))
 
-# Inline input row (text, model switch, send)
-m1, m2, m3 = st.columns([6, 2, 1])
-with m1:
-    user_text = st.text_input(
-        "Your message",
-        value=st.session_state.get("chat_text", ""),
-        label_visibility="collapsed",
-        key="chat_text",
-    )
-with m2:
-    model_options = list(
-        dict.fromkeys(
-            [
-                secrets.get("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
-                "gpt-4o",
-                "gpt-4o-mini",
-                "gpt-4.1-mini",
-            ]
-        )
-    )
-    cur_model = st.selectbox(
-        "Model",
-        model_options,
-        index=0,
-        label_visibility="collapsed",
-        key="model_select",
-    )
-with m3:
-    send = st.button("Send", use_container_width=True)
-
-if send and user_text.strip():
+user_text = st.chat_input("Send a message")
+if user_text and user_text.strip():
     message = user_text.strip()
-    st.session_state["chat_text"] = ""
     chat["messages"].append({"role": "user", "content": message})
-    with st.chat_message("user"):
-        st.markdown(message)
     if chat["title"] == "Untitled chat":
         chat["title"] = message.splitlines()[0][:40] or "Untitled chat"
 
@@ -479,12 +425,11 @@ if send and user_text.strip():
         try:
             reply = call_llm(
                 http,
-                cur_model,
+                model_name,
                 system_prompt,
                 temperature,
                 message,
                 context=context if effective_rag and context else None,
-
             )
         except Exception:  # noqa: BLE001
             st.toast("⚠️ Generation failed. Please retry.")
@@ -493,13 +438,9 @@ if send and user_text.strip():
             if citations:
                 assistant_entry["meta"] = {"sources": citations}
             chat["messages"].append(assistant_entry)
-            with st.chat_message("assistant"):
-                st.markdown(reply)
-                render_sources(citations)
-            if effective_rag and docs:
-                with st.expander("Sources"):
-                    for d in docs:
-                        source_label = d["meta"].get("source_path") or d["meta"].get("ticker") or "Source"
-                        lab = f"[{d['id']}] {source_label} (score={d['score']:.3f})"
-                        st.markdown(lab)
+
+for msg in chat["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        render_sources(msg.get("meta", {}).get("sources", []))
 

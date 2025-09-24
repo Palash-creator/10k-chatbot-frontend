@@ -1,104 +1,113 @@
+import itertools
 import json
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 import streamlit as st
-
-DEFAULT_SYSTEM_PROMPT = "You are a concise, thoughtful assistant who replies with clarity and warmth."
-DEFAULT_TEMPERATURE = 0.3
-MAX_TITLE_LEN = 40
-
-
-st.set_page_config(page_title="Gold & Black Chat", page_icon="✨", layout="wide")
-
-APP_CSS = """
-<style>
-.stApp {background-color:#0b0b0c; color:#f4e9c9;}
-section[data-testid="stSidebar"] {background:linear-gradient(180deg,#111112 0%,#050506 100%); border-right:1px solid #2a2a2d;}
-section[data-testid="stSidebar"] .stButton button, section[data-testid="stSidebar"] .stDownloadButton button {width:100%; border-radius:18px; padding:0.6rem 1rem; background:rgba(212,175,55,0.12); border:1px solid rgba(212,175,55,0.35); color:#f5ddb2; font-weight:600; box-shadow:0 8px 16px rgba(0,0,0,0.25);}
-section[data-testid="stSidebar"] .stButton button:hover, section[data-testid="stSidebar"] .stDownloadButton button:hover {background:rgba(212,175,55,0.25); border-color:#d4af37;}
-section[data-testid="stSidebar"] div[role="radiogroup"] {display:flex; flex-direction:column; gap:0.4rem;}
-section[data-testid="stSidebar"] div[role="radiogroup"] label {width:100%; background:rgba(255,255,255,0.02); border:1px solid rgba(212,175,55,0.12); padding:0.55rem 0.9rem; border-radius:14px; color:#d9c68b; box-shadow:0 6px 18px rgba(0,0,0,0.25); transition:all 0.2s ease;}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {border-color:#d4af37; color:#ffe9ad;}
-section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] {background:rgba(212,175,55,0.18); border-color:#d4af37; color:#ffe9ad;}
-.chat-chip {display:inline-flex; align-items:center; gap:0.35rem; background:rgba(212,175,55,0.18); border-radius:999px; padding:0.25rem 0.9rem; font-size:0.75rem; color:#f7df9d; border:1px solid rgba(212,175,55,0.35); box-shadow:0 4px 10px rgba(0,0,0,0.25);}
-[data-testid="stHeader"] {background:transparent;}
-.stMarkdown h1 {color:#f5ddb2;}
-.block-container {padding-top:1.2rem;}
-[data-testid="stChatMessage"] {background:rgba(255,255,255,0.03); border:1px solid rgba(212,175,55,0.2); padding:1rem; border-radius:18px; box-shadow:0 12px 24px rgba(0,0,0,0.25); margin-bottom:0.8rem;}
-[data-testid="stChatMessage"] pre {background:#121212; color:#f7f3d0; border-radius:12px;}
-[data-testid="stChatMessage-avatar"] {background:rgba(212,175,55,0.3);}
-.stChatInputContainer {border-top:1px solid #1c1c1e; background:rgba(8,8,9,0.85);}
-.stSlider > div[data-baseweb="slider"] {color:#f5ddb2;}
-</style>
-"""
-
-st.markdown(APP_CSS, unsafe_allow_html=True)
+from pydantic import BaseModel
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 
-def load_secrets() -> Dict[str, str]:
+class Settings(BaseModel):
+    OPENAI_API_KEY: str
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_EMBED_MODEL: str = "text-embedding-3-large"
+    QDRANT_URL: Optional[str] = None
+    QDRANT_API_KEY: Optional[str] = None
+    QDRANT_COLLECTION: Optional[str] = None
+
+
+st.set_page_config(page_title="Gold & Black Analyst", page_icon="✨", layout="wide")
+st.markdown(
+    """
+    <style>
+    .stApp {background:#0b0b0c;color:#f4e9c9;}
+    section[data-testid="stSidebar"] {background:linear-gradient(180deg,#111112 0%,#050506 100%);border-right:1px solid #2a2a2d;}
+    section[data-testid="stSidebar"] button {border-radius:18px;background:rgba(212,175,55,0.15);border:1px solid rgba(212,175,55,0.35);color:#f5ddb2;font-weight:600;}
+    section[data-testid="stSidebar"] button:hover {background:rgba(212,175,55,0.3);border-color:#d4af37;}
+    .chat-chip {display:inline-flex;align-items:center;gap:0.35rem;background:rgba(212,175,55,0.18);border-radius:999px;padding:0.25rem 0.9rem;font-size:0.75rem;color:#f7df9d;border:1px solid rgba(212,175,55,0.35);}
+    [data-testid="stChatMessage"] {background:rgba(255,255,255,0.04);border:1px solid rgba(212,175,55,0.18);padding:1rem;border-radius:18px;box-shadow:0 12px 24px rgba(0,0,0,0.25);margin-bottom:0.8rem;}
+    [data-testid="stChatMessage"] pre {background:#121212;color:#f7f3d0;border-radius:12px;}
+    .stChatInputContainer {border-top:1px solid #1c1c1e;background:rgba(8,8,9,0.9);}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def load_secrets() -> Dict[str, Optional[str]]:
     try:
-        api_key = st.secrets["OPENAI_API_KEY"].strip()
-    except KeyError:
-        st.error("Please add OPENAI_API_KEY to your Streamlit secrets to chat.")
+        settings = Settings(**st.secrets)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Secrets missing: {exc}")
         st.stop()
-    model = str(st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")).strip()
-    return {"api_key": api_key, "model": model}
+    data = settings.model_dump()
+    data["QDRANT_ENABLED"] = bool(data.get("QDRANT_URL") and data.get("QDRANT_COLLECTION"))
+    return data
 
 
 @st.cache_resource(show_spinner=False)
-def get_client(api_key: str) -> httpx.Client:
-    return httpx.Client(
+def get_clients(secrets: Dict[str, Optional[str]]) -> Tuple[httpx.Client, Optional[QdrantClient]]:
+    http = httpx.Client(
         base_url="https://api.openai.com/v1",
+        timeout=20.0,
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {secrets['OPENAI_API_KEY']}",
             "Content-Type": "application/json",
         },
-        timeout=httpx.Timeout(15.0, connect=5.0, read=15.0),
         http2=True,
     )
+    qc: Optional[QdrantClient] = None
+    if secrets.get("QDRANT_ENABLED"):
+        try:
+            qc = QdrantClient(
+                url=secrets["QDRANT_URL"],
+                api_key=secrets.get("QDRANT_API_KEY"),
+                timeout=60.0,
+                prefer_grpc=True,
+            )
+        except Exception:  # noqa: BLE001
+            st.toast("Qdrant connection failed; RAG disabled.")
+    return http, qc
 
 
 def retry_call(func, *args, retries: int = 4, backoff: float = 0.6, **kwargs):
     for attempt in range(1, retries + 1):
         try:
-            response = func(*args, **kwargs)
-            response.raise_for_status()
-            return response
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            resp = func(*args, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except (httpx.RequestError, httpx.HTTPStatusError):
             if attempt == retries:
-                raise exc
+                raise
             time.sleep(backoff * (2 ** (attempt - 1)))
 
 
-def ensure_state(default_prompt: str) -> None:
+def new_chat(system_prompt: str) -> Dict[str, object]:
+    return {"id": str(uuid.uuid4()), "title": "Untitled chat", "messages": [], "system_prompt": system_prompt}
+
+
+def ensure_state(default_prompt: str, default_model: str) -> None:
     st.session_state.setdefault("chats", [])
-    st.session_state.setdefault("active_chat_id", None)
-    st.session_state.setdefault("system_prompts", {})
-    st.session_state.setdefault("temperature", DEFAULT_TEMPERATURE)
+    st.session_state.setdefault("active_chat_id", "")
+    st.session_state.setdefault("temperature", 0.3)
+    st.session_state.setdefault("rag_enabled", False)
+    st.session_state.setdefault("top_k", 5)
+    st.session_state.setdefault("threshold", 0.2)
+    st.session_state.setdefault("filters", {"ticker": "", "form": ""})
+    st.session_state.setdefault("model", default_model)
     if not st.session_state["chats"]:
-        chat = create_chat(default_prompt)
-        st.session_state["chats"].append(chat)
+        chat = new_chat(default_prompt)
+        st.session_state["chats"] = [chat]
         st.session_state["active_chat_id"] = chat["id"]
-    elif st.session_state["active_chat_id"] is None:
+    elif not st.session_state["active_chat_id"]:
         st.session_state["active_chat_id"] = st.session_state["chats"][0]["id"]
-    for chat in st.session_state["chats"]:
-        st.session_state["system_prompts"].setdefault(chat["id"], default_prompt)
 
 
-def create_chat(default_prompt: str) -> Dict[str, object]:
-    chat = {"id": str(uuid.uuid4()), "title": "Untitled chat", "messages": []}
-    st.session_state.setdefault("system_prompts", {})[chat["id"]] = default_prompt
-    return chat
-
-
-def set_active_chat(chat_id: str) -> None:
-    st.session_state["active_chat_id"] = chat_id
-
-
-def get_active_chat() -> Optional[Dict[str, object]]:
+def active_chat() -> Optional[Dict[str, object]]:
     cid = st.session_state.get("active_chat_id")
     for chat in st.session_state.get("chats", []):
         if chat["id"] == cid:
@@ -106,92 +115,305 @@ def get_active_chat() -> Optional[Dict[str, object]]:
     return None
 
 
-def trim_title(text: str, limit: int = MAX_TITLE_LEN) -> str:
-    stripped = text.strip().splitlines()[0] if text.strip() else "Untitled chat"
-    return (stripped[: limit - 1] + "…") if len(stripped) > limit else stripped
+@st.cache_data(show_spinner=False, ttl=60, hash_funcs={httpx.Client: lambda _: None})
+def embed_query(client: httpx.Client, model: str, text: str) -> List[float]:
+    payload = {"model": model, "input": text}
+    resp = retry_call(client.post, "/embeddings", json=payload)
+    return resp.json()["data"][0]["embedding"]
+
+
+@st.cache_data(ttl=300, show_spinner=False, hash_funcs={QdrantClient: lambda _: None})
+def discover_facets(qc: QdrantClient, collection: str, page_size: int = 500) -> Tuple[List[str], List[str]]:
+    tickers, forms = set(), set()
+    next_offset = None
+    while True:
+        res = qc.scroll(
+            collection_name=collection,
+            with_payload=True,
+            with_vectors=False,
+            limit=page_size,
+            offset=next_offset,
+        )
+        if isinstance(res, tuple):
+            points, next_offset = res
+        else:
+            points = getattr(res, "points", [])
+            next_offset = (
+                getattr(res, "next_page_offset", None)
+                or getattr(res, "offset", None)
+                or getattr(res, "next_offset", None)
+            )
+        if not points:
+            break
+        for point in points:
+            payload = point.payload or {}
+            if (ticker := payload.get("ticker")):
+                tickers.add(str(ticker))
+            if (form := payload.get("form")):
+                forms.add(str(form))
+        if next_offset is None:
+            break
+    return sorted(tickers), sorted(forms)
+
+
+def retrieve(
+    qc: Optional[QdrantClient],
+    collection: Optional[str],
+    qvec: List[float],
+    top_k: int,
+    threshold: float,
+    ticker: str,
+    form: str,
+) -> List[Dict[str, object]]:
+    if not qc or not collection or not ticker or not form:
+        return []
+    flt = Filter(
+        must=[
+            FieldCondition(key="ticker", match=MatchValue(value=ticker)),
+            FieldCondition(key="form", match=MatchValue(value=form)),
+        ]
+    )
+    hits = qc.search(
+        collection_name=collection,
+        query_vector=qvec,
+        limit=top_k,
+        with_payload=True,
+        query_filter=flt,
+    )
+    docs: List[Dict[str, object]] = []
+    for i, h in enumerate(hits, 1):
+        if threshold and h.score < threshold:
+            continue
+        payload = h.payload or {}
+        docs.append(
+            {
+                "id": i,
+                "text": payload.get("text", ""),
+                "score": float(h.score),
+                "meta": {
+                    "source_path": payload.get("source_path"),
+                    "chunk_idx": payload.get("chunk_idx"),
+                    "ticker": payload.get("ticker"),
+                    "form": payload.get("form"),
+                },
+            }
+        )
+    return docs
+
+
+def build_context(docs: List[Dict[str, object]]) -> Tuple[str, List[Dict[str, object]]]:
+    if not docs:
+        return "", []
+    limited = [doc for doc in itertools.islice((d for d in docs if d.get("text")), 5)]
+    context = "\n\n".join(f"[{doc['id']}] {doc['text']}" for doc in limited)
+    citations = []
+    for doc in limited:
+        meta = doc.get("meta", {})
+        label = meta.get("source_path") or meta.get("ticker") or "Source"
+        citations.append(
+            {
+                "id": doc["id"],
+                "label": label,
+                "score": doc["score"],
+                "text": doc["text"],
+                "meta": meta,
+            }
+        )
+    return context, citations
+
+
+def call_llm(
+    client: httpx.Client,
+    model: str,
+    system_prompt: str,
+    temperature: float,
+    user_text: str,
+    context: Optional[str] = None,
+) -> str:
+    messages = [{"role": "system", "content": system_prompt}]
+    if context:
+        messages.append({"role": "system", "content": f"Context:\n{context}"})
+    messages.append({"role": "user", "content": user_text})
+    payload = {"model": model, "messages": messages, "temperature": temperature}
+    resp = retry_call(client.post, "/chat/completions", json=payload)
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def render_sources(sources: List[Dict[str, object]]) -> None:
+    if not sources:
+        return
+    st.markdown("**Sources**")
+    for src in sources:
+        label = src.get("label") or src.get("meta", {}).get("source_path") or "Source"
+        score = float(src.get("score", 0.0))
+        snippet = (src.get("text") or "")[:160]
+        if snippet and len(src.get("text") or "") > 160:
+            snippet += "…"
+        st.markdown(f"[{src['id']}] {label} (score={score:.3f}) — {snippet}")
+        with st.expander(f"View source [{src['id']}]"):
+            st.write(src.get("text", ""))
 
 
 secrets = load_secrets()
-client = get_client(secrets["api_key"])
-ensure_state(DEFAULT_SYSTEM_PROMPT)
-active_chat = get_active_chat()
+http, qc = get_clients(secrets)
+default_system_prompt = (
+    "You are a helpful analyst. Use the provided context; if insufficient, say so. "
+    "Cite sources with bracketed ids like [1]."
+)
+ensure_state(default_system_prompt, secrets.get("OPENAI_MODEL", "gpt-4o-mini"))
+collection_name = secrets.get("QDRANT_COLLECTION")
+if qc and collection_name:
+    try:
+        tickers, forms = discover_facets(qc, collection_name)
+    except Exception:  # noqa: BLE001
+        st.toast("Could not load Qdrant facets; you can still chat without RAG.", icon="⚠️")
+        tickers, forms = [], []
+else:
+    tickers, forms = [], []
+
+chat = active_chat()
 
 col_title, col_chip = st.columns([0.8, 0.2])
 with col_title:
-    st.title("✨ Gold & Black Chat")
+    st.title("✨ Gold & Black Analyst")
 with col_chip:
+    current_model = st.session_state.get("model", secrets["OPENAI_MODEL"])
     st.markdown(
-        f'<div style="text-align:right"><span class="chat-chip">{secrets["model"]}</span></div>',
+        f'<div style="text-align:right"><span class="chat-chip">{current_model}</span></div>',
         unsafe_allow_html=True,
     )
 
 with st.sidebar:
-    if st.button("➕ New Chat", use_container_width=True):
-        chat = create_chat(DEFAULT_SYSTEM_PROMPT)
+    if st.button("➕ New Chat", key="new_chat_btn", use_container_width=True, type="primary", help="Start fresh"):
+        chat = new_chat(default_system_prompt)
         st.session_state["chats"].insert(0, chat)
-        set_active_chat(chat["id"])
-        active_chat = chat
+        st.session_state["active_chat_id"] = chat["id"]
     st.markdown("---")
-    chat_ids = [chat["id"] for chat in st.session_state["chats"]]
-    if chat_ids:
-        titles = {chat["id"]: trim_title(chat["title"]) for chat in st.session_state["chats"]}
-        current_idx = chat_ids.index(st.session_state["active_chat_id"]) if st.session_state["active_chat_id"] in chat_ids else 0
-        selected = st.radio(
-            "Chats",
-            chat_ids,
-            index=current_idx,
-            format_func=lambda cid: titles.get(cid, "Untitled chat"),
-            label_visibility="collapsed",
-            key="chat_selector",
-        )
+    ids = [c["id"] for c in st.session_state["chats"]]
+    titles = {c["id"]: (c["title"] or "Untitled chat") for c in st.session_state["chats"]}
+    if ids:
+        idx = ids.index(st.session_state["active_chat_id"]) if st.session_state["active_chat_id"] in ids else 0
+        selected = st.radio("Chats", ids, index=idx, format_func=lambda cid: titles.get(cid, "Untitled chat"), label_visibility="collapsed")
         if selected != st.session_state["active_chat_id"]:
-            set_active_chat(selected)
-            active_chat = get_active_chat()
+            st.session_state["active_chat_id"] = selected
+            chat = active_chat()
+    st.markdown("---")
+    model_options = list(
+        dict.fromkeys(
+            [
+                secrets.get("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4.1-mini",
+            ]
+        )
+    )
+    current_model = st.selectbox(
+        "Model",
+        model_options,
+        index=model_options.index(st.session_state.get("model", model_options[0])) if st.session_state.get("model") in model_options else 0,
+    )
+    st.session_state["model"] = current_model
+    rag_toggle = st.toggle("Enable RAG (Qdrant)", value=st.session_state.get("rag_enabled", False) and bool(qc))
+    st.session_state["rag_enabled"] = rag_toggle and bool(qc)
+    st.session_state["top_k"] = st.slider("top_k", 3, 10, int(st.session_state["top_k"]))
+    st.session_state["threshold"] = st.slider("score threshold", 0.0, 1.0, float(st.session_state["threshold"]), 0.05)
+    filters = st.session_state["filters"]
+    if tickers:
+        ticker_options = [""] + tickers
+        ticker_index = ticker_options.index(filters.get("ticker", "")) if filters.get("ticker", "") in ticker_options else 0
+        filters["ticker"] = st.selectbox(
+            "Ticker",
+            ticker_options,
+            index=ticker_index,
+            format_func=lambda x: x or "Select ticker",
+        )
+    else:
+        filters["ticker"] = st.text_input("Ticker", value=filters.get("ticker", ""))
+    if forms:
+        form_options = [""] + forms
+        form_index = form_options.index(filters.get("form", "")) if filters.get("form", "") in form_options else 0
+        filters["form"] = st.selectbox(
+            "Form",
+            form_options,
+            index=form_index,
+            format_func=lambda x: x or "Select form",
+        )
+    else:
+        filters["form"] = st.text_input("Form", value=filters.get("form", ""))
+    st.session_state["filters"] = filters
     with st.expander("Advanced", expanded=False):
-        if active_chat:
-            prompt_key = active_chat["id"]
-            prompt_value = st.session_state["system_prompts"].get(prompt_key, DEFAULT_SYSTEM_PROMPT)
-            updated_prompt = st.text_area("System prompt", value=prompt_value, height=120)
-            st.session_state["system_prompts"][prompt_key] = updated_prompt.strip() or DEFAULT_SYSTEM_PROMPT
+        if chat:
+            chat["system_prompt"] = st.text_area("System prompt", value=chat.get("system_prompt", default_system_prompt), height=120)
         st.session_state["temperature"] = st.slider("Temperature", 0.0, 1.0, float(st.session_state["temperature"]), 0.05)
-    if active_chat:
-        export_data = json.dumps(active_chat, ensure_ascii=False, indent=2)
+    if chat:
         st.download_button(
             "Export chat (.json)",
-            data=export_data,
-            file_name=f"chat-{active_chat['id']}.json",
+            data=json.dumps(chat, ensure_ascii=False, indent=2),
+            file_name=f"chat-{chat['id']}.json",
             mime="application/json",
             use_container_width=True,
         )
 
-if active_chat:
-    for msg in active_chat["messages"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    if prompt := st.chat_input("Send a message"):
-        active_chat["messages"].append({"role": "user", "content": prompt})
-        if active_chat["title"] == "Untitled chat":
-            active_chat["title"] = trim_title(prompt)
-
-        messages_payload: List[Dict[str, str]] = []
-        system_prompt = st.session_state["system_prompts"].get(active_chat["id"], DEFAULT_SYSTEM_PROMPT)
-        if system_prompt:
-            messages_payload.append({"role": "system", "content": system_prompt})
-        messages_payload.extend(active_chat["messages"])
-
-        payload = {
-            "model": secrets["model"] or "gpt-4o-mini",
-            "temperature": float(st.session_state["temperature"]),
-            "messages": messages_payload,
-        }
-
-        try:
-            response = retry_call(client.post, "/chat/completions", json=payload)
-            data = response.json()
-            reply = data["choices"][0]["message"]["content"].strip()
-            active_chat["messages"].append({"role": "assistant", "content": reply})
-        except Exception:  # noqa: BLE001
-            st.toast("⚠️ Sorry, something went wrong. Please try again.")
-else:
+if not chat:
     st.info("Create a chat to begin.")
+    st.stop()
+
+filters = st.session_state.get("filters", {})
+sel_ticker = (filters.get("ticker") or "").strip()
+sel_form = (filters.get("form") or "").strip()
+rag_enabled = st.session_state.get("rag_enabled", False)
+has_facets = bool(sel_ticker and sel_form)
+effective_rag = rag_enabled and has_facets
+if rag_enabled and not has_facets:
+    st.info("Select a ticker and a form to use retrieval.", icon="ℹ️")
+
+system_prompt = chat.get("system_prompt", default_system_prompt)
+temperature = float(st.session_state.get("temperature", 0.3))
+top_k = int(st.session_state.get("top_k", 5))
+threshold = float(st.session_state.get("threshold", 0.2))
+embed_model = secrets.get("OPENAI_EMBED_MODEL", "text-embedding-3-large")
+model_name = st.session_state.get("model", secrets.get("OPENAI_MODEL", "gpt-4o-mini"))
+
+user_text = st.chat_input("Send a message")
+if user_text and user_text.strip():
+    message = user_text.strip()
+    chat["messages"].append({"role": "user", "content": message})
+    if chat["title"] == "Untitled chat":
+        chat["title"] = message.splitlines()[0][:40] or "Untitled chat"
+
+    docs: List[Dict[str, object]] = []
+    citations: List[Dict[str, object]] = []
+    context: Optional[str] = None
+    if effective_rag:
+        with st.spinner("Retrieving…"):
+            try:
+                qvec = embed_query(http, embed_model, message)
+                docs = retrieve(qc, collection_name, qvec, top_k, threshold, sel_ticker, sel_form)
+                context, citations = build_context(docs)
+            except Exception:  # noqa: BLE001
+                st.toast("RAG unavailable; continuing without context.", icon="⚠️")
+                docs, citations, context = [], [], None
+
+    with st.spinner("Generating…"):
+        try:
+            reply = call_llm(
+                http,
+                model_name,
+                system_prompt,
+                temperature,
+                message,
+                context=context if effective_rag and context else None,
+            )
+        except Exception:  # noqa: BLE001
+            st.toast("⚠️ Generation failed. Please retry.")
+        else:
+            assistant_entry: Dict[str, object] = {"role": "assistant", "content": reply}
+            if citations:
+                assistant_entry["meta"] = {"sources": citations}
+            chat["messages"].append(assistant_entry)
+
+for msg in chat["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        render_sources(msg.get("meta", {}).get("sources", []))

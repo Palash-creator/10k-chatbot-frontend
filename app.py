@@ -56,7 +56,7 @@ SYSTEM_PROMPT = (
 )
 
 # ==================== UI Theme ====================
-st.set_page_config(page_title="SEC Filings Chatbot", page_icon="📄", layout="wide")
+st.set_page_config(page_title="SEC Filings Chatbot", page_icon="🗠", layout="wide")
 GOLD = "#D4AF37"
 st.markdown(f"""
 <style>
@@ -88,7 +88,7 @@ h1,h2,h3,h4 {{ color:var(--gold); }}
 </style>
 """, unsafe_allow_html=True)
 
-st.header("SEC Filings Chatbot")
+st.header("🗠 SEC Filings Chatbot")
 
 # ==================== State ====================
 def ensure_state():

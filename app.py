@@ -41,10 +41,10 @@ GEMINI_API_KEY     = _secret("GEMINI_API_KEY", "")  # hidden; only used if prese
 GROQ_API_KEY       = _secret("GROQ_API_KEY", "")    # hidden; only used if present
 
 # Custom avatars (path/URL/emoji). You can also set BOT_AVATAR/USER_AVATAR in secrets/env.
-BOT_AVATAR  = _secret("BOT_AVATAR",  os.getenv("BOT_AVATAR",  "assets/bot.png"))
-USER_AVATAR = _secret("USER_AVATAR", os.getenv("USER_AVATAR", "assets/user.png"))
-BOT_AVATAR  = BOT_AVATAR  if (BOT_AVATAR  and os.path.exists(BOT_AVATAR))  else "🤖"
-USER_AVATAR = USER_AVATAR if (USER_AVATAR and os.path.exists(USER_AVATAR)) else "🧑‍💻"
+BOT_AVATAR  = _secret("BOT_AVATAR",  os.getenv("BOT_AVATAR",  "bot.png"))
+USER_AVATAR = _secret("USER_AVATAR", os.getenv("USER_AVATAR", "user.png"))
+BOT_AVATAR  = BOT_AVATAR  if (BOT_AVATAR  and os.path.exists(BOT_AVATAR))  else "🧠"
+USER_AVATAR = USER_AVATAR if (USER_AVATAR and os.path.exists(USER_AVATAR)) else "🧑‍💼"
 
 SYSTEM_PROMPT = (
     "You are an expert financial analyst chatbot. Provide precise, data-driven answers based on the provided context.\n"

@@ -5,7 +5,6 @@
 
 import os, re, json, time, uuid, traceback
 from typing import List, Dict, Any, Tuple, Optional
-
 import streamlit as st
 import httpx
 from dotenv import load_dotenv, find_dotenv
@@ -33,7 +32,7 @@ QDRANT_COLLECTION  = _secret("QDRANT_COLLECTION", "sec_filings")
 
 # Chat providers (defaults + optional secrets)
 # Default provider = Gemini (best free option)
-DEFAULT_PROVIDER   = "Gemini"
+DEFAULT_PROVIDER   = "OpenAI"
 DEFAULT_GEM_MODEL  = _secret("GEMINI_MODEL", "gemini-1.5-flash")  # free tier
 DEFAULT_OAI_MODEL  = _secret("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_GROQ_MODEL = _secret("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -107,7 +106,7 @@ def ensure_state():
 
     # Provider + model defaults
     ss.setdefault("provider", DEFAULT_PROVIDER)  # "Gemini" | "OpenAI" | "Groq"
-    ss.setdefault("model", DEFAULT_GEM_MODEL)
+    ss.setdefault("model", DEFAULT_OAI_MODEL)
 
     # Hidden override keys (not shown unless user types)
     ss.setdefault("openai_key_override", "")

@@ -42,6 +42,11 @@ streamlit run app.py
 
 Streamlit will open a browser window at `http://localhost:8501`.
 
+### Running without Qdrant
+
+The interface still loads if you have not configured the Qdrant connection (the "Portfolio Builder" / RAG tools are disabled).
+Add `QDRANT_URL` (and optionally `QDRANT_API_KEY`) to Streamlit secrets or environment variables to turn retrieval back on.
+
 ## Usage Tips
 
 1. Click **➕ New Chat** to start a fresh conversation; prior chats stay available in the sidebar.

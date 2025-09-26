@@ -21,7 +21,10 @@ except Exception:
 load_dotenv(find_dotenv(filename="secrets.env", usecwd=True) or "", override=False)
 
 def _secret(k: str, default: Optional[str] = None) -> str:
-    return st.secrets.get(k, os.getenv(k, default))
+    try:
+        return st.secrets.get(k, os.getenv(k, default))
+    except Exception:
+        return os.getenv(k, default)
 
 # Qdrant / Embeddings (OpenAI embeddings for RAG)
 OPENAI_API_KEY     = _secret("OPENAI_API_KEY", "")
@@ -29,6 +32,10 @@ OPENAI_EMBED_MODEL = _secret("OPENAI_EMBED_MODEL", "text-embedding-3-large")  # 
 QDRANT_URL         = _secret("QDRANT_URL")
 QDRANT_API_KEY     = _secret("QDRANT_API_KEY")
 QDRANT_COLLECTION  = _secret("QDRANT_COLLECTION", "sec_filings")
+
+def qdrant_configured() -> bool:
+    """Return True only when the minimal config to reach Qdrant is present."""
+    return bool(QDRANT_URL and QDRANT_URL.strip())
 
 # Chat providers (defaults + optional secrets)
 # Default provider = Gemini (best free option)
@@ -99,7 +106,7 @@ def ensure_state():
         "messages": [{"role":"system","content":SYSTEM_PROMPT}]
     }])
     ss.setdefault("active_chat_id", ss["chats"][0]["id"])
-    ss.setdefault("rag_enabled", True)
+    ss.setdefault("rag_enabled", qdrant_configured())
     ss.setdefault("temperature", 0.3)
     ss.setdefault("top_k", 5)
     ss.setdefault("threshold", 0.0)
@@ -129,13 +136,21 @@ def active_chat() -> Dict[str, Any]:
 
 # ==================== Clients (Qdrant only; HTTP calls per provider) ====================
 @st.cache_resource
-def get_qdrant_client() -> QdrantClient:
+def get_qdrant_client() -> Optional[QdrantClient]:
+    if not qdrant_configured():
+        return None
     q_timeout = float(os.getenv("QDRANT_TIMEOUT", "180"))
-    return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=q_timeout, prefer_grpc=True)
+    try:
+        return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=q_timeout, prefer_grpc=True)
+    except Exception as e:
+        st.toast(f"Qdrant disabled: {type(e).__name__}: {e}", icon="⚠️")
+        return None
 
 qc = get_qdrant_client()
 
 def ensure_payload_indexes():
+    if qc is None:
+        return
     for field in ("ticker", "form", "period"):
         try:
             qc.create_payload_index(
@@ -146,6 +161,7 @@ def ensure_payload_indexes():
             )
         except Exception:
             pass
+
 ensure_payload_indexes()
 
 # ==================== Utilities ====================
@@ -164,6 +180,8 @@ def safe_err(e: BaseException) -> str:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def collection_vector_size() -> Optional[int]:
+    if qc is None:
+        return None
     try:
         info = qc.get_collection(QDRANT_COLLECTION)
         vec = info.config.params.vectors
@@ -173,6 +191,8 @@ def collection_vector_size() -> Optional[int]:
 
 @st.cache_data(ttl=300)
 def discover_facets(page_size: int = 500) -> Tuple[List[str], List[str]]:
+    if qc is None:
+        return [], []
     tickers, forms = set(), set()
     offset = None
     while True:
@@ -197,6 +217,8 @@ ALLOWED_TICKERS = ["AAPL","MSFT","GOOGL","AMZN","META","NVDA","AMD","TSLA","AVGO
 TICKERS = [t for t in TICKERS if t in ALLOWED_TICKERS]
 
 def qdrant_count_safe(collection: str, flt) -> int:
+    if qc is None:
+        return 0
     try:
         return qc.count(collection, exact=True, filter=flt).count
     except Exception as e1:
@@ -234,7 +256,14 @@ with st.sidebar:
 
     st.divider()
     st.subheader("RAG")
-    st.session_state["rag_enabled"] = st.toggle("Enable RAG (Qdrant)", value=st.session_state["rag_enabled"])
+    rag_disabled = not qdrant_configured() or qc is None
+    toggle_help = "Configure QDRANT_URL (and optional API key) to enable retrieval."
+    st.session_state["rag_enabled"] = st.toggle(
+        "Enable RAG (Qdrant)",
+        value=bool(st.session_state["rag_enabled"] and not rag_disabled),
+        disabled=rag_disabled,
+        help=toggle_help if rag_disabled else None,
+    )
 
     with st.expander("Advanced Settings", expanded=False):
         # Provider + models (default Gemini)
@@ -264,7 +293,9 @@ with st.sidebar:
         use_container_width=True)
 
     with st.expander("🔎 RAG Diagnostics", expanded=False):
-        if st.button("Run checks", use_container_width=True):
+        if rag_disabled:
+            st.info("Qdrant connection not configured. Add QDRANT_URL to enable diagnostics.")
+        elif st.button("Run checks", use_container_width=True):
             try:
                 size = collection_vector_size(); st.write("Collection dim:", size)
                 # Embedding dim ping (OpenAI embeddings)
@@ -302,16 +333,39 @@ with st.sidebar:
     )
 
 # ==================== Top selectors ====================
+rag_ready = qdrant_configured() and qc is not None
 sc1, sc2, sc3 = st.columns([1.2, 1.2, 2.6])
 with sc1:
     DEFAULT_TICKER = "AAPL"
     if "sel_ticker" not in st.session_state:
         st.session_state["sel_ticker"] = (DEFAULT_TICKER if DEFAULT_TICKER in TICKERS else (TICKERS[0] if TICKERS else None))
-    sel_ticker = st.selectbox("Ticker", TICKERS, key="sel_ticker", placeholder="Select ticker")
+    sel_ticker = st.selectbox(
+        "Ticker",
+        TICKERS if TICKERS else ["(no tickers)"] ,
+        key="sel_ticker",
+        placeholder="Select ticker",
+        disabled=not (rag_ready and TICKERS),
+    )
 with sc2:
-    sel_form = st.selectbox("Form", FORMS, index=0 if FORMS else None, key="sel_form", placeholder="Select form")
+    sel_form = st.selectbox(
+        "Form",
+        FORMS if FORMS else ["(no forms)"] ,
+        index=0,
+        key="sel_form",
+        placeholder="Select form",
+        disabled=not (rag_ready and FORMS),
+    )
 with sc3:
-    st.caption("Select a ticker & form to enable retrieval. Use sidebar to tune RAG.")
+    if not rag_ready:
+        st.warning("Qdrant not configured. Add connection details to use retrieval.")
+    elif not TICKERS or not FORMS:
+        st.warning("No tickers/forms discovered in Qdrant. Check the collection contents.")
+    else:
+        st.caption("Select a ticker & form to enable retrieval. Use sidebar to tune RAG.")
+
+if not (rag_ready and TICKERS and FORMS):
+    st.session_state["sel_ticker"] = None
+    st.session_state["sel_form"] = None
 
 st.divider()
 
@@ -337,6 +391,8 @@ def embed_query(text: str) -> List[float]:
     return r.json()["data"][0]["embedding"]
 
 def _q_query(qvec, flt, k, thr):
+    if qc is None:
+        raise RuntimeError("Qdrant client is not configured.")
     try:
         return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, filter=flt, score_threshold=(thr or None))
     except Exception as e:
@@ -444,6 +500,8 @@ def _llm_call(provider: str, model: str, messages: List[Dict[str, str]] | Any, t
     return r.json()["choices"][0]["message"]["content"].strip()
 
 def retrieve(qvec: List[float], ticker: str, form: str, period: str, k: int, thr: float) -> List[Dict[str, Any]]:
+    if qc is None:
+        raise RuntimeError("Retrieval requires Qdrant configuration.")
     coll_dim = collection_vector_size()
     if coll_dim and coll_dim != len(qvec):
         raise RuntimeError(f"Vector size mismatch: collection={coll_dim}, embedding={len(qvec)} for {OPENAI_EMBED_MODEL}.")
@@ -584,6 +642,7 @@ if prompt:
             st.session_state["rag_enabled"]
             and st.session_state.get("sel_ticker")
             and st.session_state.get("sel_form")
+            and rag_ready
         )
         docs, ctx, qvec = [], None, None
 

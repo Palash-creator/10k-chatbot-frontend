@@ -1,0 +1,8 @@
+# Ignore specific files
+secret.env
+# Ignore all `.log` files
+*.log
+
+# Ignore temporary files
+*.tmp
+*.bak

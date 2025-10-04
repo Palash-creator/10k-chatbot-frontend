@@ -32,10 +32,11 @@ QDRANT_COLLECTION  = _secret("QDRANT_COLLECTION", "sec_filings")
 
 # Chat providers (defaults + optional secrets)
 # Default provider = Gemini (best free option)
-DEFAULT_PROVIDER   = "OpenAI"
+DEFAULT_PROVIDER   = "Groq"
 DEFAULT_GEM_MODEL  = _secret("GEMINI_MODEL", "gemini-1.5-flash")  # free tier
 DEFAULT_OAI_MODEL  = _secret("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_GROQ_MODEL = _secret("GROQ_MODEL", "llama-3.1-8b-instant")
+DEFAULT_MODEL = DEFAULT_GROQ_MODEL
 
 GEMINI_API_KEY     = _secret("GEMINI_API_KEY", "")  # hidden; only used if present
 GROQ_API_KEY       = _secret("GROQ_API_KEY", "")    # hidden; only used if present
@@ -106,7 +107,7 @@ def ensure_state():
 
     # Provider + model defaults
     ss.setdefault("provider", DEFAULT_PROVIDER)  # "Gemini" | "OpenAI" | "Groq"
-    ss.setdefault("model", DEFAULT_OAI_MODEL)
+    ss.setdefault("model", DEFAULT_MODEL)
 
     # Hidden override keys (not shown unless user types)
     ss.setdefault("openai_key_override", "")

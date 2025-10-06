@@ -1,12 +1,13 @@
 # 10k Chatbot Frontend
 
-Modern Streamlit interface for exploring OpenAI chat models with a luxe gold-and-black theme. The app keeps multiple conversations in memory, lets you fine-tune prompts, and exports transcripts for later review.
+Modern Streamlit interface for exploring Gemini or Groq chat models with a luxe gold-and-black theme. The app keeps multiple conversations in memory, lets you fine-tune prompts, and exports transcripts for later review.
 
 ## Features
 
 - ⚡️ **Multi-chat session state** with quick switching between previous conversations.
 - 🧠 **Custom system prompt & temperature controls** in a compact “Advanced” panel.
-- 🔁 **Reliable OpenAI requests** powered by a cached `httpx` client and lightweight retry logic.
+- 🔁 **Reliable Gemini / Groq requests** powered by a cached `httpx` client and lightweight retry logic.
+- 📚 **Gemini `gemini-embedding-001` embeddings** drive Qdrant retrieval for accurate, cited answers.
 - 💬 **Polished chat bubbles** built with Streamlit’s native chat components and custom CSS styling.
 - 📦 **One-click JSON export** of the active conversation for downstream analysis.
 
@@ -14,7 +15,8 @@ Modern Streamlit interface for exploring OpenAI chat models with a luxe gold-and
 
 - Python 3.9+
 - Dependencies listed in `requirements.txt`
-- OpenAI API access (Chat Completions endpoint)
+- Google AI Studio (Gemini) API access for chat + embeddings (`gemini-embedding-001`, 768-dim vectors)
+- (Optional) Groq API access for additional chat models
 
 Install dependencies:
 
@@ -28,11 +30,19 @@ Add your credentials to Streamlit secrets (recommended) or environment variables
 
 ```toml
 [default]
-OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL = "gpt-4o-mini"  # optional override
+GEMINI_API_KEY = "AIza..."
+GEMINI_MODEL = "gemini-1.5-flash"          # optional override
+# Embeddings and Qdrant
+GEMINI_EMBED_MODEL = "gemini-embedding-001" # optional override, returns 768-dim vectors
+QDRANT_URL = "https://YOUR-QDRANT-ENDPOINT"
+QDRANT_API_KEY = "qdrant-..."
+QDRANT_COLLECTION = "sec_filings"
+# Set if your collection uses named vectors
+QDRANT_VECTOR_NAME = "text_vector"
+# Optional Groq provider support
+GROQ_API_KEY = "gsk-..."
+GROQ_MODEL = "llama-3.1-8b-instant"
 ```
-
-`OPENAI_MODEL` defaults to `gpt-4o-mini` when omitted.
 
 ## Run the App
 

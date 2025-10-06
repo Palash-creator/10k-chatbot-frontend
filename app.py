@@ -1,7 +1,7 @@
 # app.py — SEC Filings Chatbot (Streamlit + Qdrant RAG)
-# Providers: Gemini (default), OpenAI, Groq
+# Providers: Gemini (default), Groq
 # Features: custom avatars, period discipline (default 2024), LangChain-style query refine (optional),
-#           version-agnostic Qdrant query, provider quotas (OpenAI=5, Groq/Gemini=8) unless user enters override key.
+#           version-agnostic Qdrant query, provider quotas (Gemini/Groq=8) unless user enters override key.
 
 import os, re, json, time, uuid, traceback
 from typing import List, Dict, Any, Tuple, Optional
@@ -23,22 +23,20 @@ load_dotenv(find_dotenv(filename="secrets.env", usecwd=True) or "", override=Fal
 def _secret(k: str, default: Optional[str] = None) -> str:
     return st.secrets.get(k, os.getenv(k, default))
 
-# Qdrant / Embeddings (OpenAI embeddings for RAG)
-OPENAI_API_KEY     = _secret("OPENAI_API_KEY", "")
-OPENAI_EMBED_MODEL = _secret("OPENAI_EMBED_MODEL", "text-embedding-3-large")  # 3072-d
+# Qdrant / Embeddings (Gemini embeddings for RAG)
+GEMINI_API_KEY     = _secret("GEMINI_API_KEY", "")  # hidden; only used if present
+GEMINI_EMBED_MODEL = _secret("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 QDRANT_URL         = _secret("QDRANT_URL")
 QDRANT_API_KEY     = _secret("QDRANT_API_KEY")
 QDRANT_COLLECTION  = _secret("QDRANT_COLLECTION", "sec_filings")
 
 # Chat providers (defaults + optional secrets)
 # Default provider = Gemini (best free option)
-DEFAULT_PROVIDER   = "Groq"
+DEFAULT_PROVIDER   = "Gemini"
 DEFAULT_GEM_MODEL  = _secret("GEMINI_MODEL", "gemini-1.5-flash")  # free tier
-DEFAULT_OAI_MODEL  = _secret("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_GROQ_MODEL = _secret("GROQ_MODEL", "llama-3.1-8b-instant")
-DEFAULT_MODEL = DEFAULT_GROQ_MODEL
+DEFAULT_MODEL = DEFAULT_GEM_MODEL
 
-GEMINI_API_KEY     = _secret("GEMINI_API_KEY", "")  # hidden; only used if present
 GROQ_API_KEY       = _secret("GROQ_API_KEY", "")    # hidden; only used if present
 
 # Custom avatars (path/URL/emoji). You can also set BOT_AVATAR/USER_AVATAR in secrets/env.
@@ -106,16 +104,15 @@ def ensure_state():
     ss.setdefault("threshold", 0.0)
 
     # Provider + model defaults
-    ss.setdefault("provider", DEFAULT_PROVIDER)  # "Gemini" | "OpenAI" | "Groq"
+    ss.setdefault("provider", DEFAULT_PROVIDER)  # "Gemini" | "Groq"
     ss.setdefault("model", DEFAULT_MODEL)
 
     # Hidden override keys (not shown unless user types)
-    ss.setdefault("openai_key_override", "")
     ss.setdefault("gemini_key_override", "")
     ss.setdefault("groq_key_override", "")
 
     # Per-provider question counters (for soft quotas without user-entered keys)
-    ss.setdefault("q_counts", {"OpenAI": 0, "Groq": 0, "Gemini": 0})
+    ss.setdefault("q_counts", {"Groq": 0, "Gemini": 0})
 
     ss.setdefault("last_error", "")
     ss.setdefault("debug", False)
@@ -225,7 +222,7 @@ with st.sidebar:
         })
         st.session_state["active_chat_id"] = nid
         # reset per-provider counters on fresh chat
-        st.session_state["q_counts"] = {"OpenAI": 0, "Groq": 0, "Gemini": 0}
+        st.session_state["q_counts"] = {"Groq": 0, "Gemini": 0}
 
     st.write("History")
     for c in st.session_state["chats"]:
@@ -239,11 +236,10 @@ with st.sidebar:
 
     with st.expander("Advanced Settings", expanded=False):
         # Provider + models (default Gemini)
-        st.session_state["provider"] = st.selectbox("Provider", ["Gemini","OpenAI","Groq"], index=["Gemini","OpenAI","Groq"].index(DEFAULT_PROVIDER))
+        provider_options = ["Gemini", "Groq"]
+        st.session_state["provider"] = st.selectbox("Provider", provider_options, index=provider_options.index(DEFAULT_PROVIDER))
         if st.session_state["provider"] == "Gemini":
             models = [DEFAULT_GEM_MODEL, "gemini-1.5-flash-8b", "gemini-1.5-pro"]
-        elif st.session_state["provider"] == "OpenAI":
-            models = [DEFAULT_OAI_MODEL, "gpt-4o", "gpt-4.1-mini"]
         else:
             models = [DEFAULT_GROQ_MODEL, "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]
         st.session_state["model"] = st.selectbox("Model", options=list(dict.fromkeys(models)), index=0)
@@ -254,7 +250,6 @@ with st.sidebar:
 
         # Optional override keys (hidden)
         st.session_state["gemini_key_override"] = st.text_input("Gemini API Key (override)", type="password", value=st.session_state.get("gemini_key_override",""))
-        st.session_state["openai_key_override"] = st.text_input("OpenAI API Key (override)", type="password", value=st.session_state.get("openai_key_override",""))
         st.session_state["groq_key_override"]   = st.text_input("Groq API Key (override)",   type="password", value=st.session_state.get("groq_key_override",""))
 
     st.divider()
@@ -268,18 +263,20 @@ with st.sidebar:
         if st.button("Run checks", use_container_width=True):
             try:
                 size = collection_vector_size(); st.write("Collection dim:", size)
-                # Embedding dim ping (OpenAI embeddings)
-                oai_key = (st.session_state.get("openai_key_override") or OPENAI_API_KEY or "").strip()
-                if oai_key:
-                    headers = {"Authorization": f"Bearer {oai_key}", "Content-Type": "application/json"}
-                    payload = {"model": OPENAI_EMBED_MODEL, "input": "diagnostic ping"}
-                    r = httpx.post("https://api.openai.com/v1/embeddings", json=payload, headers=headers, timeout=httpx.Timeout(20.0, connect=10.0))
+                # Embedding dim ping (Gemini embeddings)
+                gem_key = (st.session_state.get("gemini_key_override") or GEMINI_API_KEY or "").strip()
+                if gem_key:
+                    embed_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_EMBED_MODEL}:embedContent?key={gem_key}"
+                    payload = {"content": {"parts": [{"text": "diagnostic ping"}]}}
+                    r = httpx.post(embed_url, json=payload, timeout=httpx.Timeout(20.0, connect=10.0))
                     r.raise_for_status()
-                    emb_dim = len(r.json()["data"][0]["embedding"]); st.write("Embed dim:", emb_dim)
+                    embedding = r.json().get("embedding", {})
+                    vector = embedding.get("values") or embedding.get("value") or []
+                    emb_dim = len(vector); st.write("Embed dim:", emb_dim)
                     if size and emb_dim != size:
-                        st.error(f"Dimension mismatch. Collection={size}, Embed={emb_dim} ({OPENAI_EMBED_MODEL})")
+                        st.error(f"Dimension mismatch. Collection={size}, Embed={emb_dim} ({GEMINI_EMBED_MODEL})")
                 else:
-                    st.warning("OpenAI key missing; embeddings (RAG) will be disabled.", icon="⚠️")
+                    st.warning("Gemini key missing; embeddings (RAG) will be disabled.", icon="⚠️")
                 cnt_all = qc.count(QDRANT_COLLECTION, exact=True).count; st.write("Points count:", cnt_all)
                 sel_tick = st.session_state.get("sel_ticker"); sel_form = st.session_state.get("sel_form")
                 if sel_tick and sel_form:
@@ -327,15 +324,20 @@ for m in chat["messages"][1:]:  # skip system
 # ==================== Core RAG helpers ====================
 @st.cache_data(ttl=90, show_spinner=False)
 def embed_query(text: str) -> List[float]:
-    # Embeddings always via OpenAI (only if key present)
-    key = (st.session_state.get("openai_key_override") or OPENAI_API_KEY or "").strip()
+    # Embeddings always via Gemini (only if key present)
+    key = (st.session_state.get("gemini_key_override") or GEMINI_API_KEY or "").strip()
     if not key:
-        raise RuntimeError("OpenAI API key is required for embeddings.")
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    payload = {"model": OPENAI_EMBED_MODEL, "input": text}
-    r = retry_call(httpx.post, "https://api.openai.com/v1/embeddings", json=payload, headers=headers, timeout=httpx.Timeout(20.0, connect=10.0))
+        raise RuntimeError("Gemini API key is required for embeddings.")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_EMBED_MODEL}:embedContent?key={key}"
+    payload = {"content": {"parts": [{"text": text}]}}
+    r = retry_call(httpx.post, url, json=payload, timeout=httpx.Timeout(20.0, connect=10.0))
     r.raise_for_status()
-    return r.json()["data"][0]["embedding"]
+    data = r.json()
+    embedding = data.get("embedding", {})
+    vector = embedding.get("values") or embedding.get("value") or []
+    if not vector:
+        raise RuntimeError("Gemini embedding response missing vector values.")
+    return vector
 
 def _q_query(qvec, flt, k, thr):
     try:
@@ -377,14 +379,14 @@ def refine_prompt(user_text: str, ticker: Optional[str], form: Optional[str], pe
     if ChatPromptTemplate:
         tmpl = ChatPromptTemplate.from_messages([("system", system), ("user", "{question}")])
         provider = st.session_state.get("provider", DEFAULT_PROVIDER)
-        mdl = (DEFAULT_OAI_MODEL if provider == "OpenAI" else (DEFAULT_GROQ_MODEL if provider == "Groq" else DEFAULT_GEM_MODEL))
+        mdl = DEFAULT_GROQ_MODEL if provider == "Groq" else DEFAULT_GEM_MODEL
         rewritten = _llm_call(provider, mdl, tmpl.format_messages(question=user_text), temperature=0.0)
         return rewritten.strip() if rewritten else f"{user_text} (scope: {ticker} {form} {period})"
     return f"{user_text}\n\n(Answer strictly from {ticker or 'the selected ticker'} {form or 'the selected form'} for reporting period {period}.)"
 
 # === Provider-agnostic chat ===
 def _llm_call(provider: str, model: str, messages: List[Dict[str, str]] | Any, temperature: float = 0.2) -> str:
-    # Normalize messages to OpenAI-like list
+    # Normalize messages to chat-completion-style list
     norm_msgs: List[Dict[str,str]] = []
     if isinstance(messages, list) and messages and isinstance(messages[0], dict):
         norm_msgs = messages
@@ -421,6 +423,7 @@ def _llm_call(provider: str, model: str, messages: List[Dict[str, str]] | Any, t
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except Exception:
             raise httpx.HTTPError("Gemini response parsing failed.")
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
     if provider == "Groq":
         key = (st.session_state.get("groq_key_override") or GROQ_API_KEY or "").strip()
@@ -432,22 +435,12 @@ def _llm_call(provider: str, model: str, messages: List[Dict[str, str]] | Any, t
                        json=body, headers=headers, timeout=httpx.Timeout(30.0, connect=10.0))
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
-
-    # OpenAI
-    key = (st.session_state.get("openai_key_override") or OPENAI_API_KEY or "").strip()
-    if not key:
-        raise httpx.HTTPError("OpenAI key missing. Enter one in Advanced Settings or switch provider.")
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    body = {"model": model, "temperature": temperature, "messages": norm_msgs}
-    r = retry_call(httpx.post, "https://api.openai.com/v1/chat/completions",
-                   json=body, headers=headers, timeout=httpx.Timeout(30.0, connect=10.0))
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    raise ValueError(f"Unsupported provider: {provider}")
 
 def retrieve(qvec: List[float], ticker: str, form: str, period: str, k: int, thr: float) -> List[Dict[str, Any]]:
     coll_dim = collection_vector_size()
     if coll_dim and coll_dim != len(qvec):
-        raise RuntimeError(f"Vector size mismatch: collection={coll_dim}, embedding={len(qvec)} for {OPENAI_EMBED_MODEL}.")
+        raise RuntimeError(f"Vector size mismatch: collection={coll_dim}, embedding={len(qvec)} for {GEMINI_EMBED_MODEL}.")
     must = [FieldCondition(key="ticker", match=MatchValue(value=ticker)),
             FieldCondition(key="form",   match=MatchValue(value=form))]
     if period:
@@ -500,12 +493,9 @@ def call_llm(provider: str, model: str, user_text: str, context: Optional[str], 
     msgs.append({"role":"user","content":user_text})
     try:
         return _llm_call(provider, model, msgs, temperature=temperature)
-    except httpx.HTTPStatusError as e:
+    except httpx.HTTPStatusError:
         # Fallbacks
-        if provider == "OpenAI":
-            if model != DEFAULT_OAI_MODEL:
-                return _llm_call("OpenAI", DEFAULT_OAI_MODEL, msgs, temperature=temperature)
-        elif provider == "Groq":
+        if provider == "Groq":
             if model != DEFAULT_GROQ_MODEL:
                 return _llm_call("Groq", DEFAULT_GROQ_MODEL, msgs, temperature=temperature)
         else:  # Gemini
@@ -515,8 +505,6 @@ def call_llm(provider: str, model: str, user_text: str, context: Optional[str], 
 
 # ==================== Quota checks ====================
 def provider_key_present(provider: str) -> bool:
-    if provider == "OpenAI":
-        return bool((st.session_state.get("openai_key_override") or OPENAI_API_KEY).strip())
     if provider == "Gemini":
         return bool((st.session_state.get("gemini_key_override") or GEMINI_API_KEY).strip())
     if provider == "Groq":
@@ -524,27 +512,27 @@ def provider_key_present(provider: str) -> bool:
     return False
 
 def quota_limit(provider: str) -> int:
-    return 5 if provider == "OpenAI" else 8
+    return 8
 
 def check_quota_and_maybe_block(provider: str) -> bool:
     """
     Returns True if we should BLOCK (i.e., stop answering) due to quota without override key.
-    Policy: OpenAI stops after 5 questions; Groq/Gemini stop after 8. If user types an override key
-    for that provider, quota is lifted.
+    Policy: Gemini and Groq stop after 8 questions. If the user types an override key for that
+    provider, the quota is lifted.
     """
-    counts = st.session_state.get("q_counts", {"OpenAI":0,"Groq":0,"Gemini":0})
+    counts = st.session_state.get("q_counts", {"Groq":0,"Gemini":0})
     count = counts.get(provider, 0)
     limit = quota_limit(provider)
     if count >= limit and not st.session_state.get(f"{provider.lower()}_key_override", ""):
         msg = (f"You've reached the free quota for **{provider}** "
                f"({limit} questions). Enter a {provider} API key in **Advanced Settings**, "
-               f"or switch Provider (Gemini/Groq/OpenAI).")
+               f"or switch Provider (Gemini/Groq).")
         st.warning(msg, icon="⚠️")
         return True
     return False
 
 def incr_quota(provider: str):
-    counts = st.session_state.get("q_counts", {"OpenAI":0,"Groq":0,"Gemini":0})
+    counts = st.session_state.get("q_counts", {"Groq":0,"Gemini":0})
     counts[provider] = counts.get(provider, 0) + 1
     st.session_state["q_counts"] = counts
 
@@ -594,7 +582,7 @@ if prompt:
                     qvec = embed_query(refined)
             except Exception as e:
                 st.session_state["last_error"] = f"Embed error: {safe_err(e)}"
-                st.toast("Embedding failed or OpenAI key missing. Falling back to non-RAG.", icon="⚠️")
+                st.toast("Embedding failed or Gemini key missing. Falling back to non-RAG.", icon="⚠️")
                 use_rag = False
 
         if use_rag and qvec is not None:

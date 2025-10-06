@@ -15,7 +15,7 @@ Modern Streamlit interface for exploring Gemini or Groq chat models with a luxe 
 
 - Python 3.9+
 - Dependencies listed in `requirements.txt`
-- Google AI Studio (Gemini) API access for chat + embeddings (`gemini-embedding-001`)
+- Google AI Studio (Gemini) API access for chat + embeddings (`gemini-embedding-001`, 768-dim vectors)
 - (Optional) Groq API access for additional chat models
 
 Install dependencies:
@@ -32,7 +32,13 @@ Add your credentials to Streamlit secrets (recommended) or environment variables
 [default]
 GEMINI_API_KEY = "AIza..."
 GEMINI_MODEL = "gemini-1.5-flash"          # optional override
-GEMINI_EMBED_MODEL = "gemini-embedding-001" # optional override
+# Embeddings and Qdrant
+GEMINI_EMBED_MODEL = "gemini-embedding-001" # optional override, returns 768-dim vectors
+QDRANT_URL = "https://YOUR-QDRANT-ENDPOINT"
+QDRANT_API_KEY = "qdrant-..."
+QDRANT_COLLECTION = "sec_filings"
+# Set if your collection uses named vectors
+QDRANT_VECTOR_NAME = "text_vector"
 # Optional Groq provider support
 GROQ_API_KEY = "gsk-..."
 GROQ_MODEL = "llama-3.1-8b-instant"

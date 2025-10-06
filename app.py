@@ -4,6 +4,7 @@
 #           version-agnostic Qdrant query, provider quotas (Gemini/Groq=8) unless user enters override key.
 
 import os, re, json, time, uuid, traceback
+from collections.abc import Mapping
 from typing import List, Dict, Any, Tuple, Optional
 import streamlit as st
 import httpx
@@ -29,6 +30,7 @@ GEMINI_EMBED_MODEL = _secret("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 QDRANT_URL         = _secret("QDRANT_URL")
 QDRANT_API_KEY     = _secret("QDRANT_API_KEY")
 QDRANT_COLLECTION  = _secret("QDRANT_COLLECTION", "sec_filings")
+QDRANT_VECTOR_NAME = _secret("QDRANT_VECTOR_NAME", "") or None
 
 # Chat providers (defaults + optional secrets)
 # Default provider = Gemini (best free option)
@@ -154,6 +156,10 @@ def retry_call(fn, *a, **k):
             if i == 3: raise
             time.sleep(min(2.0*(i+1), 6.0))
 
+
+def _vector_kwargs() -> Dict[str, Any]:
+    return {"vector_name": QDRANT_VECTOR_NAME} if QDRANT_VECTOR_NAME else {}
+
 def safe_err(e: BaseException) -> str:
     try: return "".join(traceback.format_exception_only(type(e), e)).strip()
     except Exception:
@@ -162,10 +168,52 @@ def safe_err(e: BaseException) -> str:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def collection_vector_size() -> Optional[int]:
+    """Return the dimensionality of the configured vector set in Qdrant."""
     try:
         info = qc.get_collection(QDRANT_COLLECTION)
-        vec = info.config.params.vectors
-        return getattr(vec, "size", None)
+        vectors = getattr(info.config.params, "vectors", None)
+        if vectors is None:
+            return None
+        # Single unnamed vector configuration
+        if hasattr(vectors, "size"):
+            return getattr(vectors, "size", None)
+        # Named vectors configuration
+        if isinstance(vectors, Mapping):
+            if QDRANT_VECTOR_NAME and QDRANT_VECTOR_NAME in vectors:
+                target = vectors[QDRANT_VECTOR_NAME]
+                size = getattr(target, "size", None) or getattr(target, "dimension", None)
+                if size:
+                    return size
+                if isinstance(target, dict):
+                    return target.get("size") or target.get("dimension")
+            # fallback to first defined vector
+            for target in vectors.values():
+                if target is None:
+                    continue
+                size = getattr(target, "size", None) or getattr(target, "dimension", None)
+                if size:
+                    return size
+                if isinstance(target, dict):
+                    size = target.get("size") or target.get("dimension")
+                    if size:
+                        return size
+        # Some client versions expose named vectors via attribute instead of mapping
+        if hasattr(vectors, "__dict__") and isinstance(vectors.__dict__, dict):
+            maybe = vectors.__dict__
+            if QDRANT_VECTOR_NAME and QDRANT_VECTOR_NAME in maybe:
+                target = maybe[QDRANT_VECTOR_NAME]
+                size = getattr(target, "size", None) or getattr(target, "dimension", None)
+                if size:
+                    return size
+                if isinstance(target, dict):
+                    return target.get("size") or target.get("dimension")
+            for target in maybe.values():
+                if target is None:
+                    continue
+                size = getattr(target, "size", None) or getattr(target, "dimension", None)
+                if size:
+                    return size
+        return None
     except Exception:
         return None
 
@@ -262,7 +310,9 @@ with st.sidebar:
     with st.expander("🔎 RAG Diagnostics", expanded=False):
         if st.button("Run checks", use_container_width=True):
             try:
-                size = collection_vector_size(); st.write("Collection dim:", size)
+                size = collection_vector_size()
+                st.write("Collection dim:", size)
+                st.write("Vector name:", QDRANT_VECTOR_NAME or "<default>")
                 # Embedding dim ping (Gemini embeddings)
                 gem_key = (st.session_state.get("gemini_key_override") or GEMINI_API_KEY or "").strip()
                 if gem_key:
@@ -340,22 +390,28 @@ def embed_query(text: str) -> List[float]:
     return vector
 
 def _q_query(qvec, flt, k, thr):
+    vec_kwargs = _vector_kwargs()
     try:
-        return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, filter=flt, score_threshold=(thr or None))
+        return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, filter=flt, score_threshold=(thr or None), **vec_kwargs)
     except Exception as e:
         msg = str(e)
         if "Unknown arguments" in msg and "filter" in msg:
             try:
-                return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, query_filter=flt, score_threshold=(thr or None))
+                return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, query_filter=flt, score_threshold=(thr or None), **vec_kwargs)
             except Exception as e2:
                 if "Unknown arguments" in str(e2) and "score_threshold" in str(e2):
-                    return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, query_filter=flt)
+                    return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, query_filter=flt, **vec_kwargs)
         if "Unknown arguments" in msg and "score_threshold" in msg:
             try:
-                return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, filter=flt)
+                return qc.query_points(collection_name=QDRANT_COLLECTION, query=qvec, limit=k, with_payload=True, filter=flt, **vec_kwargs)
             except Exception:
                 pass
-    return qc.search(collection_name=QDRANT_COLLECTION, query_vector=qvec, limit=k, with_payload=True, query_filter=flt)
+    try:
+        return qc.search(collection_name=QDRANT_COLLECTION, query_vector=qvec, limit=k, with_payload=True, query_filter=flt, **vec_kwargs)
+    except Exception:
+        if vec_kwargs:
+            return qc.search(collection_name=QDRANT_COLLECTION, query_vector=qvec, limit=k, with_payload=True, query_filter=flt)
+        raise
 
 def _iter_hits(hits):
     pts = getattr(hits, "points", hits)
@@ -440,7 +496,10 @@ def _llm_call(provider: str, model: str, messages: List[Dict[str, str]] | Any, t
 def retrieve(qvec: List[float], ticker: str, form: str, period: str, k: int, thr: float) -> List[Dict[str, Any]]:
     coll_dim = collection_vector_size()
     if coll_dim and coll_dim != len(qvec):
-        raise RuntimeError(f"Vector size mismatch: collection={coll_dim}, embedding={len(qvec)} for {GEMINI_EMBED_MODEL}.")
+        vname = QDRANT_VECTOR_NAME or "default"
+        raise RuntimeError(
+            f"Vector size mismatch: collection={coll_dim}, embedding={len(qvec)} for {GEMINI_EMBED_MODEL} (vector {vname})."
+        )
     must = [FieldCondition(key="ticker", match=MatchValue(value=ticker)),
             FieldCondition(key="form",   match=MatchValue(value=form))]
     if period:
